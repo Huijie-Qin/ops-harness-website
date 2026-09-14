@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <title>工作助手</title>
+  <path d="M9.5 29.8C6.5 21.7 10.6 12.7 18.7 9.7C24.1 7.7 30.1 9 34.2 12.9" stroke="#4F46E5" stroke-width="7.2" stroke-linecap="round"/>
+  <path d="M38.5 18.2C40.8 26.1 36.4 34.7 28.5 37.4C23.3 39.1 17.6 37.6 13.8 33.8" stroke="#4F46E5" stroke-width="7.2" stroke-linecap="round"/>
+  <path d="M13.8 33.3 35 12.2M27.8 12.2H35v7.2" stroke="#14B8A6" stroke-width="7.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M41 3.8c.45 1.7 1.5 2.75 3.2 3.2-1.7.45-2.75 1.5-3.2 3.2-.45-1.7-1.5-2.75-3.2-3.2 1.7-.45 2.75-1.5 3.2-3.2Z" fill="#F59E0B"/>
+</svg>

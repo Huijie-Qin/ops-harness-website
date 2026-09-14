@@ -1,0 +1,101 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { createHash } from 'node:crypto'
+import { readFile, mkdtemp, mkdir, writeFile, rm, readdir } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { loadConfig } from '../server/config.js'
+
+const externalConfig = { schemaVersion: 1, websiteUrl: 'http://127.0.0.1:4197', host: '127.0.0.1', port: 4197, releaseDirectory: '../data/packages', contentDirectory: '../data/docs', adminPasswordEnv: 'DSH_OPS_WEBSITE_ADMIN_PASSWORD' }
+
+test('standalone defaults and external configuration keep state relative to their own config', async t => {
+  const project = fileURLToPath(new URL('../', import.meta.url))
+  const keys = ['DSH_OPS_WEBSITE_CONFIG', 'DSH_OPS_RELEASE_CONFIG', 'DSH_OPS_WEBSITE_CONTENT_CONFIG']
+  const previous = keys.map(key => process.env[key])
+  keys.forEach(key => { delete process.env[key] })
+  t.after(() => keys.forEach((key, index) => {
+    const value = previous[index]
+    if (value === undefined) delete process.env[key]; else process.env[key] = value
+  }))
+  assert.deepEqual(await readdir(path.join(project, 'config')), ['website.json'])
+  const defaults = await loadConfig()
+  assert.equal(defaults.configPath, path.join(project, 'config/website.json'))
+  assert.equal(defaults.releaseDirectory, path.join(project, '.runtime/website-releases'))
+  assert.equal(defaults.contentDirectory, path.join(project, '.runtime/website-content'))
+  assert.equal(defaults.adminPasswordEnv, 'DSH_OPS_WEBSITE_ADMIN_PASSWORD')
+  const root = await mkdtemp(path.join(tmpdir(), 'standalone website '))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, 'config'))
+  const website = path.join(root, 'config/website.json')
+  await writeFile(website, '\uFEFF' + JSON.stringify(externalConfig))
+  for (const key of ['DSH_OPS_RELEASE_CONFIG', 'DSH_OPS_WEBSITE_CONTENT_CONFIG']) {
+    process.env[key] = 'obsolete.json'
+    await assert.rejects(loadConfig(), /Set DSH_OPS_WEBSITE_CONFIG/)
+    delete process.env[key]
+  }
+  process.env.DSH_OPS_WEBSITE_CONFIG = website
+  const config = await loadConfig()
+  assert.equal(config.releaseDirectory, path.join(root, 'data/packages'))
+  assert.equal(config.contentDirectory, path.join(root, 'data/docs'))
+  assert.equal(config.websiteUrl, externalConfig.websiteUrl)
+  assert.equal(config.port, externalConfig.port)
+  const explicit = path.join(root, 'explicit.json'), releases = path.join(root, 'absolute releases'), content = path.join(root, 'absolute docs')
+  await writeFile(explicit, JSON.stringify({ ...externalConfig, releaseDirectory: releases, contentDirectory: content }))
+  const selected = await loadConfig(explicit)
+  assert.equal(selected.configPath, explicit)
+  assert.equal(selected.releaseDirectory, releases)
+  assert.equal(selected.contentDirectory, content)
+})
+
+test('unified configuration preserves strict release and content validation', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'website-config-validation-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const configPath = path.join(root, 'website.json')
+  for (const invalid of [
+    { schemaVersion: 2 }, { websiteUrl: 'http://example.com' }, { websiteUrl: 'https://example.com/guide' },
+    { port: 0 }, { releaseDirectory: '' }, { contentDirectory: undefined }, { contentDirectory: '  ' },
+    { adminPasswordEnv: undefined }, { adminPasswordEnv: 'invalid-name' }, { password: 'must-not-be-stored' },
+  ]) {
+    await writeFile(configPath, JSON.stringify({ ...externalConfig, ...invalid }))
+    await assert.rejects(loadConfig(configPath))
+  }
+  await writeFile(configPath, '{')
+  await assert.rejects(loadConfig(configPath), SyntaxError)
+})
+
+test('release CLI uses unified environment configuration and an explicit override without loading administrator credentials', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'website-cli-config-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const project = fileURLToPath(new URL('../', import.meta.url))
+  const envConfig = path.join(root, 'environment.json'), explicitConfig = path.join(root, 'explicit.json')
+  await writeFile(envConfig, JSON.stringify({ ...externalConfig, releaseDirectory: 'env-releases', contentDirectory: 'docs' }))
+  await writeFile(explicitConfig, JSON.stringify({ ...externalConfig, releaseDirectory: 'explicit-releases', contentDirectory: 'docs' }))
+  const input = path.join(root, 'input'), notes = path.join(root, 'notes.json')
+  await mkdir(input)
+  await writeFile(path.join(input, 'WiseOperation Assistant Setup 9.9.9.exe'), 'isolated test fixture')
+  await writeFile(notes, JSON.stringify({ title: '配置测试', notes: ['隔离的 CLI 配置验收'] }))
+  const args = ['--import', 'tsx', 'scripts/publish-release.ts', '--version', '9.9.9', '--platform', 'windows-x64', '--input', input, '--notes', notes]
+  const options = { cwd: project, env: { ...process.env, DSH_OPS_WEBSITE_CONFIG: envConfig, DSH_OPS_WEBSITE_ADMIN_PASSWORD: 'short' }, timeout: 30_000 }
+  await promisify(execFile)(process.execPath, args, options)
+  await promisify(execFile)(process.execPath, [...args, '--config', explicitConfig], options)
+  for (const directory of ['env-releases', 'explicit-releases']) {
+    const catalog = JSON.parse(await readFile(path.join(root, directory, 'catalog.json'), 'utf8'))
+    assert.equal(catalog.releases[0].version, '9.9.9')
+  }
+  await assert.rejects(readFile(path.join(root, 'docs/guide/current/start.md')), { code: 'ENOENT' })
+})
+
+test('bundled release contract matches its provenance and installed package', async () => {
+  const record = JSON.parse(await readFile(new URL('../vendor/release-contract.json', import.meta.url), 'utf8'))
+  const bytes = await readFile(new URL(`../vendor/${record.artifact}`, import.meta.url))
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), record.sha256)
+  const source = new URL('../node_modules/@dsh-ops/release-contract/', import.meta.url)
+  const installed = JSON.parse(await readFile(new URL('package.json', source), 'utf8'))
+  assert.equal(installed.name, record.name)
+  assert.equal(installed.version, record.version)
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.dependencies[record.name], `file:vendor/${record.artifact}`)
+})

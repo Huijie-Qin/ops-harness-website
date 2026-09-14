@@ -1,0 +1,16 @@
+{
+  "name": "@dsh-ops/release-contract",
+  "version": "0.1.0",
+  "sourceRepository": "ops-harness (dsh_plugins checkout)",
+  "sourceCommit": "1403193331b3fa1d4e638d153d7d03ea43dc91f9",
+  "sourcePath": "packages/shared/release-contract",
+  "artifact": "dsh-ops-release-contract-0.1.0.tgz",
+  "sha256": "7d026f63e9454f0e21f7b74c79965164f0e51f00605a508e0752bb62fa942a38",
+  "sourceSha256": {
+    "src/index.ts": "4693f4e99ebb40ee3f1ffc48ba48bfead41ecee76964a49b9e825b249c1939cb",
+    "package.json": "487296b8e6d1dd2dad35ae72d3829265009cae205edef1890f26f9d82dd0580b",
+    "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "protocolSchemaVersion": 1
+}

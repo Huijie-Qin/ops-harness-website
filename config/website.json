@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "websiteUrl": "http://127.0.0.1:4173",
+  "host": "127.0.0.1",
+  "port": 4173,
+  "releaseDirectory": "../.runtime/website-releases",
+  "contentDirectory": "../.runtime/website-content",
+  "adminPasswordEnv": "DSH_OPS_WEBSITE_ADMIN_PASSWORD"
+}

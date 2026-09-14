@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+dist/
+coverage/
+.runtime/
+public/assets/vendor/
+.env
+.env.*
+*.log
+.DS_Store
+.idea/

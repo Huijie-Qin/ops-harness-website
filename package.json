@@ -1,0 +1,37 @@
+{
+  "name": "@dsh-ops/website",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WiseOperation Assistant website and release service",
+  "scripts": {
+    "dev": "node scripts/prepare-assets.mjs && tsx watch server/main.ts --dev",
+    "build": "node scripts/prepare-assets.mjs && vite build && tsc -p tsconfig.server.json && node scripts/copy-guide.mjs",
+    "start": "node dist/server/main.js",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc -p tsconfig.server.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "release": "tsx scripts/publish-release.ts",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "dependencies": {
+    "@dsh-ops/release-contract": "file:vendor/dsh-ops-release-contract-0.1.0.tgz",
+    "markdown-it": "15.0.2",
+    "vditor": "4.0.0",
+    "vue": "3.5.42",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "14.2.0",
+    "@types/node": "24.13.3",
+    "@vitejs/plugin-vue": "6.0.8",
+    "tsx": "4.23.12",
+    "typescript": "5.9.2",
+    "vite": "7.3.6",
+    "vue-tsc": "3.3.11"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
