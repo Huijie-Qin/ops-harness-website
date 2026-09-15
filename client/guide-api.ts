@@ -1,6 +1,7 @@
 const messages: Record<string, string> = {
   MANIFEST_REQUIRED: '请先上传与安装包同一次打包生成的 latest.yml（macOS 为 latest-mac.yml）。',
-  INVALID_MANIFEST: '描述文件无效：请选择打包生成的更新 YAML，需包含版本号、文件名、大小和 SHA-512；只支持 Windows x64 与 macOS arm64，最多 32 KiB。',
+  INVALID_MANIFEST: '描述文件无效：请选择打包生成的更新 YAML，需包含 version 和 files 中的 url、SHA-512；size 可省略，若提供需为正整数字节数。只支持 Windows x64 与 macOS arm64，最多 32 KiB。',
+  MANIFEST_DUPLICATE_KEY: '描述文件中同一层级出现重复字段，请检查缩进。files 中每个文件只保留一个 sha512；末尾的 path、sha512、releaseDate 应与 version 顶格对齐。',
   MANIFEST_LOCKED: '描述文件已锁定。如需更换构建产物，请新建发布草稿。',
   MANIFEST_RELEASE_MISMATCH: '描述文件的版本或平台与此草稿不一致，请选择对应文件或新建草稿。',
   PACKAGE_NOT_IN_MANIFEST: '此文件未列在描述文件中，请选择清单中的原始安装包，不要重命名。',

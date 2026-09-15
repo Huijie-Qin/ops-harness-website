@@ -1,6 +1,6 @@
 import { parseDocument, visit, isAlias, isCollection, isNode } from 'yaml'
 import { z } from 'zod'
-import { ArtifactSchema, VersionSchema } from '@dsh-ops/release-contract'
+import { ArtifactSchema, FileNameSchema, VersionSchema } from '@dsh-ops/release-contract'
 import { maxManifestBytes, type ReleaseManifest } from '../shared/admin.js'
 import { GuideError } from './guide-store.js'
 import { matchingArtifacts } from './publish.js'
@@ -10,7 +10,8 @@ export const ManifestInputSchema = z.object({
   content: z.string().min(1).refine(v => Buffer.byteLength(v) <= maxManifestBytes),
 }).strict()
 
-const FileSchema = z.object({ url: z.string().min(1).max(540), sha512: ArtifactSchema.shape.sha512, size: ArtifactSchema.shape.size })
+// electron-builder always emits a checksum, but some targets omit file size.
+const FileSchema = z.object({ url: z.string().min(1).max(540), sha512: ArtifactSchema.shape.sha512, size: ArtifactSchema.shape.size.optional() })
 const MetadataSchema = z.object({
   version: VersionSchema, files: z.array(FileSchema).min(1).max(8),
   path: z.string().optional(), sha512: ArtifactSchema.shape.sha512.optional(),
@@ -28,6 +29,7 @@ export function parseReleaseManifest(input: unknown): ReleaseManifest {
   try {
     const source = ManifestInputSchema.parse(input)
     const doc = parseDocument(source.content, { schema: 'core', uniqueKeys: true, strict: true })
+    if (doc.errors.some(error => error.code === 'DUPLICATE_KEY')) throw new GuideError('MANIFEST_DUPLICATE_KEY')
     if (doc.errors.length || doc.warnings.length) throw new Error('Invalid YAML')
     let nodes = 0
     visit(doc, (_key, node, ancestors) => {
@@ -35,7 +37,9 @@ export function parseReleaseManifest(input: unknown): ReleaseManifest {
       if (isCollection(node) && node.items.length > 100) throw new Error('Oversized collection')
     })
     const metadata = MetadataSchema.parse(doc.toJS({ maxAliasCount: 0 }))
-    const files = metadata.files.map(file => ArtifactSchema.parse({ name: fileName(file.url), size: file.size, sha512: file.sha512 }))
+    const files = metadata.files.map(file => ({ name: FileNameSchema.parse(fileName(file.url)), sha512: file.sha512,
+      ...(file.size === undefined ? {} : { size: file.size }),
+    }))
     if (new Set(files.map(f => f.name.toLowerCase())).size !== files.length) throw new Error('Duplicate file')
     for (const file of files) {
       if (Buffer.from(file.sha512, 'base64').toString('base64') !== file.sha512) throw new Error('Non-canonical hash')
@@ -48,5 +52,8 @@ export function parseReleaseManifest(input: unknown): ReleaseManifest {
     if ((metadata.path === undefined) !== (metadata.sha512 === undefined)) throw new Error('Incomplete legacy metadata')
     if (metadata.path !== undefined && !files.some(f => f.name === fileName(metadata.path!) && f.sha512 === metadata.sha512)) throw new Error('Conflicting legacy metadata')
     return { ...source, version: metadata.version, platform, files }
-  } catch { throw new GuideError('INVALID_MANIFEST') }
+  } catch (error) {
+    if (error instanceof GuideError) throw error
+    throw new GuideError('INVALID_MANIFEST')
+  }
 }

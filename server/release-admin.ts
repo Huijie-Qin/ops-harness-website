@@ -77,7 +77,7 @@ export class ReleaseAdmin {
     })
   }
   private checkFiles(manifest: ReleaseManifest, files: ReleaseDraft['files']) {
-    if (files.some(file => !manifest.files.some(expected => expected.name === file.name && expected.size === file.size && expected.sha512 === file.sha512))) throw new GuideError('PACKAGE_CHECKSUM_MISMATCH', 409)
+    if (files.some(file => !manifest.files.some(expected => expected.name === file.name && (expected.size === undefined || expected.size === file.size) && expected.sha512 === file.sha512))) throw new GuideError('PACKAGE_CHECKSUM_MISMATCH', 409)
   }
   async attachManifest(id: string, input: unknown, expected: unknown) {
     const manifest = parseReleaseManifest(input)
@@ -103,7 +103,7 @@ export class ReleaseAdmin {
       const file = await receiveFile(req, directory, maxPackageBytes)
       let moved = false, committed = false
       try {
-        if (file.size !== artifact.size || file.sha512 !== artifact.sha512) throw new GuideError('PACKAGE_CHECKSUM_MISMATCH', 409)
+        if (artifact.size !== undefined && file.size !== artifact.size || file.sha512 !== artifact.sha512) throw new GuideError('PACKAGE_CHECKSUM_MISMATCH', 409)
         try { await lstat(path.join(directory, name)); throw new GuideError('FILE_EXISTS', 409) } catch (e) { if (!missing(e)) throw e }
         await rename(file.temp, path.join(directory, name)); moved = true
         const result = await this.write({ ...current, files: [...current.files, { name, size: file.size, sha512: file.sha512 }] })
@@ -149,7 +149,11 @@ export class ReleaseAdmin {
       }
       if (existing && (existing.title !== current.title || JSON.stringify(existing.notes) !== JSON.stringify(current.notes))) throw new GuideError('RELEASE_NOTES_MISMATCH', 409)
       try {
-        const expectedArtifacts = current.manifest.files.filter(file => current.files.some(uploaded => uploaded.name === file.name))
+        const expectedArtifacts = current.files.map(file => {
+          const reference = current.manifest!.files.find(expected => expected.name === file.name)!
+          // Keep the build checksum pinned; fill an omitted size from the verified upload.
+          return { name: reference.name, sha512: reference.sha512, size: reference.size ?? file.size }
+        })
         const result = await publishRelease({ root: this.root, input: path.join(this.directory(id), 'files'), version: current.version, platform: current.platform, notes: { title: current.title, notes: current.notes }, signal, expectedArtifacts })
         await this.write({ ...current, published: true }); return result
       } catch (e) {

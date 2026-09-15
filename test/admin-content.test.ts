@@ -277,6 +277,7 @@ test('legacy drafts must attach matching metadata, recheck existing disk bytes, 
   const { releases, json, upload } = await fixture(t)
   const id = '12345678-1234-4234-8234-123456789abc', bytes = Buffer.from('MZ-legacy-build')
   const manifest = releaseManifest(bytes), metadata = parseYaml(manifest.content)
+  delete metadata.files[0].size; manifest.content = stringify(metadata)
   await mkdir(path.join(releases.drafts, id, 'files'), { recursive: true })
   await writeFile(path.join(releases.drafts, id, 'files/Office-9.9.9-x64.exe'), bytes)
   await writeFile(path.join(releases.drafts, id, 'draft.json'), JSON.stringify({ ...notes, id, published: false,
@@ -316,4 +317,45 @@ test('cancelled installer upload cleans its partial file, keeps the manifest and
   assert.deepEqual(await readdir(dir), [])
   assert.equal((await releases.get(draft.id)).revision, draft.revision)
   assert.equal((await upload(route, bytes, { 'X-Revision': draft.revision })).status, 200)
+})
+
+test('size-less build descriptors still reject damaged bytes, publish measured sizes and pin the build checksum', async t => {
+  const { releases, json, upload, origin } = await fixture(t)
+  const bytes = Buffer.from('MZ-build-with-no-declared-size'), input = releaseInput(bytes)
+  const source = parseYaml(input.manifest.content); delete source.files[0].size; input.manifest.content = stringify(source)
+  const preview = await json('/api/admin/releases/manifest', { manifest: input.manifest })
+  assert.equal(preview.status, 200); assert.equal((await preview.json()).manifest.files[0].size, undefined)
+  let draft = (await (await json('/api/admin/releases', { draft: input })).json()).draft
+  const api = `/api/admin/releases/drafts/${draft.id}`, fileUrl = api + '/files?name=Office-9.9.9-x64.exe'
+  const damaged = Buffer.from(bytes); damaged[5] = damaged[5]! ^ 1
+  for (const body of [damaged, bytes.subarray(0, -1), Buffer.concat([bytes, Buffer.from('extra')])]) {
+    const response = await upload(fileUrl, body, { 'X-Revision': draft.revision })
+    assert.equal(response.status, 409); assert.equal((await response.json()).error, 'PACKAGE_CHECKSUM_MISMATCH')
+    assert.equal((await releases.get(draft.id)).revision, draft.revision)
+    assert.deepEqual(await readdir(path.join(releases.drafts, draft.id, 'files')), [])
+  }
+  draft = (await (await upload(fileUrl, bytes, { 'X-Revision': draft.revision })).json()).draft
+  assert.equal(draft.files[0].size, bytes.length); assert.equal(draft.files[0].sha512, source.files[0].sha512)
+  const restarted = await new ReleaseAdmin(releases.root).get(draft.id)
+  assert.equal(restarted.files[0]!.size, bytes.length); assert.equal(restarted.manifest!.files[0]!.size, undefined)
+  const disk = path.join(releases.drafts, draft.id, 'files/Office-9.9.9-x64.exe')
+  await writeFile(disk, damaged)
+  assert.equal((await json(api + '/publish', { revision: draft.revision })).status, 409)
+  assert.equal((await releases.list()).releases.length, 0)
+  await writeFile(disk, bytes)
+  assert.equal((await json(api + '/publish', { revision: draft.revision })).status, 200)
+  const metadata = parseYaml(await (await fetch(origin + '/updates/archive/9.9.9/windows-x64/latest.yml')).text())
+  assert.equal(metadata.files[0].sha512, source.files[0].sha512); assert.equal(metadata.files[0].size, bytes.length)
+  const downloaded = await fetch(origin + '/updates/archive/9.9.9/windows-x64/Office-9.9.9-x64.exe')
+  assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), bytes)
+})
+
+test('a declared size is still enforced even when the uploaded checksum matches', async t => {
+  const { releases, json, upload } = await fixture(t)
+  const bytes = Buffer.from('MZ-correct-checksum'), input = releaseInput(bytes), source = parseYaml(input.manifest.content)
+  source.files[0].size++; input.manifest.content = stringify(source)
+  const draft = (await (await json('/api/admin/releases', { draft: input })).json()).draft
+  const response = await upload(`/api/admin/releases/drafts/${draft.id}/files?name=Office-9.9.9-x64.exe`, bytes, { 'X-Revision': draft.revision })
+  assert.equal(response.status, 409); assert.equal((await response.json()).error, 'PACKAGE_CHECKSUM_MISMATCH')
+  assert.deepEqual((await releases.get(draft.id)).files, [])
 })

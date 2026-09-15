@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import type { ReleaseDraft, ManagedRelease, ReleaseManifest } from '../shared/admin'
+import type { ReleaseDraft, ManagedRelease, ReleaseManifest, ReleaseManifestArtifact } from '../shared/admin'
 import { maxManifestBytes, maxPackageBytes } from '../shared/admin'
 import { ApiError, guideApi, requestMessage, uploadFile } from './guide-api'
 import WebsiteDialog from './WebsiteDialog.vue'
@@ -119,13 +119,13 @@ async function send(event: Event) {
         const expected = current.value!.manifest?.files.find(f => f.name === file.name)
         if (!expected) throw new ApiError('PACKAGE_NOT_IN_MANIFEST')
         if (file.size > maxPackageBytes) throw new ApiError('UPLOAD_TOO_LARGE')
-        if (file.size !== expected.size) throw new ApiError('PACKAGE_CHECKSUM_MISMATCH')
+        if (expected.size !== undefined && file.size !== expected.size) throw new ApiError('PACKAGE_CHECKSUM_MISMATCH')
         uploadName.value = file.name; progress.value = 0
         const result = await uploadFile<{ draft: ReleaseDraft }>(`/api/admin/releases/drafts/${current.value!.id}/files?name=${encodeURIComponent(file.name)}`, file, {
           csrf: props.csrf, revision: current.value!.revision, signal: upload.signal, progress: v => progress.value = v,
         }); adopt(result.draft)
       }
-      await list(); notice.value = '上传完成，文件大小与 SHA-512 均与描述文件一致。可以核对并发布。'
+      await list(); notice.value = '上传完成，SHA-512 校验通过，文件大小已记录。可以核对并发布。'
     } catch (e) {
       if (upload.signal.aborted) notice.value = '上传已取消，已通过校验的文件仍保留。'
       else throw e
@@ -169,6 +169,10 @@ function size(bytes: number) {
 }
 function platformLabel(platform: string) { return platform === 'windows-x64' ? 'Windows x64' : 'macOS Apple 芯片' }
 function uploaded(name: string) { return current.value?.files.some(f => f.name === name) }
+function manifestSize(file: ReleaseManifestArtifact) {
+  const bytes = file.size ?? current.value?.files.find(uploaded => uploaded.name === file.name)?.size
+  return bytes === undefined ? '上传后读取大小' : size(bytes)
+}
 function required(name: string) { return name.endsWith(manifest.value?.platform === 'windows-x64' ? '.exe' : '.zip') }
 onMounted(() => run(list))
 onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false); emit('busy', false) })
@@ -216,7 +220,7 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
         </form>
         <section v-if="manifest" class="package-upload" aria-labelledby="package-heading">
           <div class="editor-heading">
-            <div><h3 id="package-heading">3. 上传并校验安装包</h3><p>文件名、大小和 SHA-512 必须与下方清单一致。单文件最多 2 GiB。</p></div>
+            <div><h3 id="package-heading">3. 上传并校验安装包</h3><p>核对文件名和 SHA-512；描述文件提供大小时也会比对。单文件最多 2 GiB。</p></div>
             <div v-if="current" class="admin-actions">
               <input ref="fileInput" class="file-input" type="file" accept=".exe,.zip,.dmg" multiple tabindex="-1" aria-label="选择软件包文件" :disabled="busy || dirty || current.published" @change="send" />
               <button class="button secondary" :disabled="busy || dirty || current.published" @click="fileInput?.click()">上传软件包</button>
@@ -226,7 +230,7 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
           <p v-if="creating" class="editor-help">保存草稿后即可上传下列文件。版本和校验清单将锁定。</p>
           <div v-if="uploadName" class="upload-progress" role="status"><span>{{ uploadName }}</span><progress :value="progress" max="100"></progress>{{ progress }}% · {{ progress === 100 ? '正在校验保存…' : '上传中' }}</div>
           <article v-for="file in manifest.files" :key="file.name" class="package-file">
-            <div><strong>{{ file.name }}</strong><small>{{ size(file.size) }} · {{ required(file.name) ? '必需' : '可选' }} · <span :class="{ 'package-verified': uploaded(file.name) }">{{ uploaded(file.name) ? '校验通过' : '待上传' }}</span></small><details><summary>预期 SHA-512</summary><code>{{ file.sha512 }}</code></details></div>
+            <div><strong>{{ file.name }}</strong><small>{{ manifestSize(file) }} · {{ required(file.name) ? '必需' : '可选' }} · <span :class="{ 'package-verified': uploaded(file.name) }">{{ uploaded(file.name) ? '校验通过' : '待上传' }}</span></small><details><summary>预期 SHA-512</summary><code>{{ file.sha512 }}</code></details></div>
             <button v-if="uploaded(file.name) && !current?.published" :disabled="busy || dirty" @click="removeFile(file.name)">移除</button>
           </article>
           <p class="editor-help">请保留打包生成的原始文件名。只有清单中列出的文件才能上传；校验失败的文件不会保存。</p>
