@@ -3,6 +3,7 @@ import { ReleaseAdmin } from './release-admin.js'
 import { MediaStore } from './media-store.js'
 import type { ContentSync } from './content-sync.js'
 import { GuideError } from './guide-store.js'
+import { parseReleaseManifest } from './release-manifest.js'
 
 export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync): AdminHandler {
   return async (req, res, url, { json, method, body }) => {
@@ -18,6 +19,10 @@ export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sy
       json(res, req.method === 'GET' ? { images: await media.list() } : { image: await media.upload(req, url.searchParams.get('name') ?? '') })
       return true
     }
+    if (url.pathname === '/api/admin/releases/manifest') {
+      method(req, ['POST'])
+      json(res, { manifest: parseReleaseManifest((await body(req)).manifest) }); return true
+    }
     if (url.pathname === '/api/admin/releases') {
       method(req, ['GET','POST'])
       json(res, req.method === 'GET' ? await releases.list() : { draft: await releases.create((await body(req)).draft) }); return true
@@ -27,10 +32,13 @@ export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sy
       method(req, ['PUT']); const data = await body(req)
       json(res, { release: await releases.update(decodeURIComponent(published[1]!), data.release, data.revision) }); return true
     }
-    const match = /^\/api\/admin\/releases\/drafts\/([^/]+)(?:\/(files|publish))?$/.exec(url.pathname)
+    const match = /^\/api\/admin\/releases\/drafts\/([^/]+)(?:\/(files|publish|manifest))?$/.exec(url.pathname)
     if (!match) return false
     const id = match[1]!, action = match[2]
-    if (action === 'files') {
+    if (action === 'manifest') {
+      method(req, ['PUT']); const data = await body(req)
+      json(res, { draft: await releases.attachManifest(id, data.manifest, data.revision) })
+    } else if (action === 'files') {
       method(req, ['POST','DELETE']); const name = url.searchParams.get('name') ?? ''
       json(res, { draft: req.method === 'POST' ? await releases.upload(id, name, req, req.headers['x-revision']) : await releases.removeFile(id, name, (await body(req)).revision) })
     } else if (action === 'publish') {

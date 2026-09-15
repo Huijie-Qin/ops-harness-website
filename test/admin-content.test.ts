@@ -1,4 +1,6 @@
 import { crc32, deflateSync } from 'node:zlib'
+import { createHash } from 'node:crypto'
+import { stringify, parse as parseYaml } from 'yaml'
 import { test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, symlink } from 'node:fs/promises'
@@ -23,6 +25,11 @@ function pngChunk(type:string, data:Buffer){const name=Buffer.from(type),length=
 const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(1,0);ihdr.writeUInt32BE(1,4);ihdr[8]=8;ihdr[9]=6
 const image=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),pngChunk('IHDR',ihdr),pngChunk('IDAT',deflateSync(Buffer.from([0,120,100,220,255]))),pngChunk('IEND',Buffer.alloc(0))])
 const notes={version:'9.9.9',platform:'windows-x64',title:'测试发布',notes:['新增图文编辑','支持目录管理']}
+function releaseManifest(bytes:Buffer, version='9.9.9', name=`Office-${version}-x64.exe`) {
+  const sha512=createHash('sha512').update(bytes).digest('base64')
+  return {name:'latest.yml',content:stringify({version,files:[{url:name,size:bytes.length,sha512}],path:name,sha512,releaseDate:'2026-09-15T00:00:00.000Z'})}
+}
+function releaseInput(bytes:Buffer) { return {title:notes.title,notes:notes.notes,manifest:releaseManifest(bytes)} }
 async function fixture(t:TestContext){
   const root=await mkdtemp(path.join(tmpdir(),'website-admin-content-'));t.after(()=>rm(root,{recursive:true,force:true}))
   const source=path.join(root,'repository/content'),seed=path.join(source,'guide');await mkdir(seed,{recursive:true})
@@ -75,11 +82,12 @@ test('authenticated image upload is deduplicated, publicly served, survives rest
 })
 test('release drafts upload with CAS, publish through the immutable catalog, edit changelog and withdraw',async t=>{
   const {json,upload,origin,headers,releases}=await fixture(t)
-  let response=await json('/api/admin/releases',{draft:notes});assert.equal(response.status,200)
+  const bytes=Buffer.from('MZ-isolated-test-only-never-execute')
+  let response=await json('/api/admin/releases',{draft:releaseInput(bytes)});assert.equal(response.status,200)
   let draft=(await response.json()).draft;const api=`/api/admin/releases/drafts/${draft.id}`
   assert.equal((await json(api+'/publish',{revision:draft.revision})).status,400)
   assert.equal((await upload(api+'/files?name=Office-1.0.0-x64.exe',Buffer.from('MZ-test'),{'X-Revision':draft.revision})).status,400)
-  const bytes=Buffer.from('MZ-isolated-test-only-never-execute'),old=draft.revision
+  const old=draft.revision
   response=await upload(api+'/files?name=Office-9.9.9-x64.exe',bytes,{'X-Revision':draft.revision});assert.equal(response.status,200);draft=(await response.json()).draft
   assert.equal(draft.files[0].size,bytes.length)
   assert.equal((await upload(api+'/files?name=Office-9.9.9-x64.zip',bytes,{'X-Revision':old})).status,409)
@@ -99,14 +107,14 @@ test('release drafts upload with CAS, publish through the immutable catalog, edi
 })
 test('new mutation routes reject anonymous, cross-origin and missing CSRF requests',async t=>{
   const {origin,headers}=await fixture(t)
-  for(const route of ['/api/admin/navigation','/api/admin/images','/api/admin/releases']){
+  for(const route of ['/api/admin/navigation','/api/admin/images','/api/admin/releases','/api/admin/releases/manifest','/api/admin/releases/drafts/12345678-1234-4234-8234-123456789abc/manifest']){
     assert.equal((await fetch(origin+route)).status,401)
     for(const override of [{'X-CSRF-Token':''},{Origin:'https://evil.example'}])assert.equal((await fetch(origin+route,{method:'POST',headers:{...headers,...override,'Content-Type':'application/json'},body:'{}'})).status,403)
   }
 })
 test('publication refuses changed bytes after upload review and keeps the draft recoverable',async t=>{
   const {json,upload,releases}=await fixture(t)
-  const draft=(await (await json('/api/admin/releases',{draft:notes})).json()).draft,api=`/api/admin/releases/drafts/${draft.id}`
+  const draft=(await (await json('/api/admin/releases',{draft:releaseInput(Buffer.from('MZ-reviewed'))})).json()).draft,api=`/api/admin/releases/drafts/${draft.id}`
   const saved=(await (await upload(api+'/files?name=Office-9.9.9-x64.exe',Buffer.from('MZ-reviewed'),{'X-Revision':draft.revision})).json()).draft
   await writeFile(path.join(releases.drafts,draft.id,'files/Office-9.9.9-x64.exe'),'MZ-changed')
   assert.equal((await json(api+'/publish',{revision:saved.revision})).status,409)
@@ -134,7 +142,7 @@ test('cancelled upload cleans partial bytes and allows a later upload',async t=>
 })
 test('uploaded file removal retains a recoverable copy and symlink paths fail closed',async t=>{
   const {json,upload,releases,root}=await fixture(t)
-  const draft=(await (await json('/api/admin/releases',{draft:notes})).json()).draft,api=`/api/admin/releases/drafts/${draft.id}`
+  const draft=(await (await json('/api/admin/releases',{draft:releaseInput(Buffer.from('MZ-test'))})).json()).draft,api=`/api/admin/releases/drafts/${draft.id}`
   const saved=(await (await upload(api+'/files?name=Office-9.9.9-x64.exe',Buffer.from('MZ-test'),{'X-Revision':draft.revision})).json()).draft
   assert.equal((await json(api+'/files?name=Office-9.9.9-x64.exe',{revision:saved.revision},'DELETE')).status,200)
   assert.equal((await releases.get(draft.id)).files.length,0)
@@ -227,4 +235,85 @@ test('content sync refuses changed source/online revisions, corrupt images, syml
   await writeFile(path.join(root,'content/content-sync-review.json'),JSON.stringify({backupId:'unfinished'}))
   await assert.rejects(sync.preview(),{code:'CONTENT_SYNC_REVIEW'})
   assert.deepEqual(await readFile(path.join(source,'guide/one.md')),original)
+})
+
+test('manifest-first release rejects manual creation and corrupt/truncated uploads, then publishes verified bytes', async t => {
+  const { json, upload, origin, releases } = await fixture(t)
+  const bytes = Buffer.from('MZ-original-build-artifact'), input = releaseInput(bytes)
+  let response = await json('/api/admin/releases', { draft: notes })
+  assert.equal(response.status, 400); assert.equal((await response.json()).error, 'MANIFEST_REQUIRED')
+  response = await json('/api/admin/releases/manifest', { manifest: input.manifest })
+  assert.equal(response.status, 200)
+  const preview = (await response.json()).manifest
+  assert.equal(preview.version, '9.9.9'); assert.equal(preview.platform, 'windows-x64')
+  assert.equal((await releases.list()).drafts.length, 0)
+  let draft = (await (await json('/api/admin/releases', { draft: input })).json()).draft
+  const api = `/api/admin/releases/drafts/${draft.id}`, fileUrl = api + '/files?name=Office-9.9.9-x64.exe'
+  const damaged = Buffer.from(bytes); damaged[5] = damaged[5]! ^ 1
+  for (const payload of [damaged, bytes.subarray(0, -1), Buffer.concat([bytes, Buffer.from('extra')])]) {
+    response = await upload(fileUrl, payload, { 'X-Revision': draft.revision })
+    assert.equal(response.status, 409); assert.equal((await response.json()).error, 'PACKAGE_CHECKSUM_MISMATCH')
+    const state = await releases.get(draft.id)
+    assert.equal(state.revision, draft.revision); assert.equal(state.files.length, 0)
+    assert.deepEqual(await readdir(path.join(releases.drafts, draft.id, 'files')), [])
+    assert.equal((await json(api + '/publish', { revision: draft.revision })).status, 400)
+  }
+  assert.equal((await upload(api + '/files?name=Other-9.9.9-x64.exe', bytes, { 'X-Revision': draft.revision })).status, 400)
+  assert.equal((await json(api, { draft: { ...notes, version: '9.9.10' }, revision: draft.revision }, 'PUT')).status, 409)
+  assert.equal((await json(api + '/manifest', { manifest: releaseManifest(damaged), revision: draft.revision }, 'PUT')).status, 409)
+  response = await upload(fileUrl, bytes, { 'X-Revision': draft.revision }); assert.equal(response.status, 200)
+  draft = (await response.json()).draft
+  assert.equal(draft.files[0].sha512, preview.files[0].sha512)
+  const restarted = new ReleaseAdmin(releases.root)
+  assert.deepEqual((await restarted.get(draft.id)).manifest, preview)
+  const raw = JSON.parse(await readFile(path.join(releases.drafts, draft.id, 'draft.json'), 'utf8'))
+  assert.deepEqual(raw.manifest, input.manifest)
+  assert.equal((await json(api + '/publish', { revision: draft.revision })).status, 200)
+  const feed = await (await fetch(origin + '/updates/archive/9.9.9/windows-x64/latest.yml')).text()
+  assert.equal(parseYaml(feed).files[0].sha512, preview.files[0].sha512)
+})
+
+test('legacy drafts must attach matching metadata, recheck existing disk bytes, and preserve revision guards', async t => {
+  const { releases, json, upload } = await fixture(t)
+  const id = '12345678-1234-4234-8234-123456789abc', bytes = Buffer.from('MZ-legacy-build')
+  const manifest = releaseManifest(bytes), metadata = parseYaml(manifest.content)
+  await mkdir(path.join(releases.drafts, id, 'files'), { recursive: true })
+  await writeFile(path.join(releases.drafts, id, 'files/Office-9.9.9-x64.exe'), bytes)
+  await writeFile(path.join(releases.drafts, id, 'draft.json'), JSON.stringify({ ...notes, id, published: false,
+    files: [{ name: metadata.path, size: bytes.length, sha512: metadata.sha512 }], createdAt: '2026-09-15T00:00:00.000Z' }))
+  let draft = await releases.get(id)
+  assert.equal(draft.manifest, undefined)
+  const api = `/api/admin/releases/drafts/${id}`
+  let response = await json(api + '/publish', { revision: draft.revision })
+  assert.equal(response.status, 400); assert.equal((await response.json()).error, 'MANIFEST_REQUIRED')
+  assert.equal((await upload(api + '/files?name=Office-9.9.9-x64.zip', bytes, { 'X-Revision': draft.revision })).status, 400)
+  assert.equal((await json(api + '/manifest', { manifest, revision: 'stale' }, 'PUT')).status, 409)
+  response = await json(api + '/manifest', { manifest: releaseManifest(bytes, '9.9.10'), revision: draft.revision }, 'PUT')
+  assert.equal(response.status, 409); assert.equal((await response.json()).error, 'MANIFEST_RELEASE_MISMATCH')
+  const damaged = Buffer.from(bytes); damaged[3] = damaged[3]! ^ 1
+  await writeFile(path.join(releases.drafts, id, 'files/Office-9.9.9-x64.exe'), damaged)
+  response = await json(api + '/manifest', { manifest, revision: draft.revision }, 'PUT')
+  assert.equal(response.status, 409); assert.equal((await response.json()).error, 'PACKAGE_CHECKSUM_MISMATCH')
+  assert.equal((await releases.get(id)).revision, draft.revision)
+  await writeFile(path.join(releases.drafts, id, 'files/Office-9.9.9-x64.exe'), bytes)
+  response = await json(api + '/manifest', { manifest, revision: draft.revision }, 'PUT'); assert.equal(response.status, 200)
+  const oldRevision = draft.revision; draft = (await response.json()).draft
+  assert.notEqual(draft.revision, oldRevision)
+  assert.equal((await json(api + '/publish', { revision: oldRevision })).status, 409)
+  assert.equal((await json(api + '/publish', { revision: draft.revision })).status, 200)
+})
+
+test('cancelled installer upload cleans its partial file, keeps the manifest and can be retried', async t => {
+  const { releases, origin, headers, json, upload } = await fixture(t), bytes = Buffer.alloc(1024, 7)
+  const draft = (await (await json('/api/admin/releases', { draft: releaseInput(bytes) })).json()).draft
+  const route = `/api/admin/releases/drafts/${draft.id}/files?name=Office-9.9.9-x64.exe`, dir = path.join(releases.drafts, draft.id, 'files')
+  const req = request(origin + route, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/octet-stream', 'X-Revision': draft.revision, 'Content-Length': String(bytes.length) } })
+  req.on('error', () => {}); req.write(bytes.subarray(0, 100))
+  for (let n = 0; n < 100; n++) { if ((await readdir(dir).catch(() => [])).some(f => f.endsWith('.upload'))) break; await new Promise(r => setTimeout(r, 10)) }
+  assert.ok((await readdir(dir)).some(f => f.endsWith('.upload')))
+  req.destroy()
+  for (let n = 0; n < 100; n++) { if (!(await readdir(path.dirname(dir))).includes('.draft-lock')) break; await new Promise(r => setTimeout(r, 10)) }
+  assert.deepEqual(await readdir(dir), [])
+  assert.equal((await releases.get(draft.id)).revision, draft.revision)
+  assert.equal((await upload(route, bytes, { 'X-Revision': draft.revision })).status, 200)
 })

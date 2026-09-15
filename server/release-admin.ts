@@ -4,14 +4,16 @@ import path from 'node:path'
 import type { IncomingMessage } from 'node:http'
 import { z } from 'zod'
 import { ArtifactSchema, CatalogSchema, FileNameSchema, PlatformSchema, ReleaseNotesSchema, ReleaseSchema, VersionSchema } from '@dsh-ops/release-contract'
-import { maxPackageBytes, type ReleaseDraft } from '../shared/admin.js'
+import { maxPackageBytes, type ReleaseDraft, type ReleaseManifest } from '../shared/admin.js'
 import { GuideError, revisionOf } from './guide-store.js'
 import { atomicJson, missing, readJson, receiveFile, safeDirectory, withLock } from './admin-files.js'
 import { readCatalog } from './catalog.js'
-import { matchingArtifacts, publishRelease } from './publish.js'
+import { inspectArtifact, publishRelease } from './publish.js'
+import { ManifestInputSchema, parseReleaseManifest } from './release-manifest.js'
 
 const DraftInput = ReleaseNotesSchema.extend({ version: VersionSchema, platform: PlatformSchema }).strict()
-const DraftSchema = DraftInput.extend({ id: z.string().uuid(), published: z.boolean(), files: z.array(ArtifactSchema).max(8), createdAt: z.string().datetime() }).strict()
+const DraftSchema = DraftInput.extend({ id: z.string().uuid(), published: z.boolean(), files: z.array(ArtifactSchema).max(8), manifest: ManifestInputSchema.optional(), createdAt: z.string().datetime() }).strict()
+const CreateInput = ReleaseNotesSchema.extend({ manifest: ManifestInputSchema }).strict()
 const revision = (v: unknown) => revisionOf(JSON.stringify(v))
 function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   const result = schema.safeParse(input)
@@ -24,7 +26,14 @@ export class ReleaseAdmin {
   private directory(id: string) { if (!z.string().uuid().safeParse(id).success) throw new GuideError('INVALID_RELEASE'); return path.join(this.drafts, id) }
   async get(id: string): Promise<ReleaseDraft> {
     this.directory(id)
-    try { const v = parse(DraftSchema, await readJson(this.drafts, [id, 'draft.json'])); if (v.id !== id) throw new GuideError('INVALID_RELEASE'); return { ...v, revision: revision(v) } }
+    try {
+      const v = parse(DraftSchema, await readJson(this.drafts, [id, 'draft.json']))
+      if (v.id !== id) throw new GuideError('INVALID_RELEASE')
+      const { manifest: source, ...stored } = v
+      const manifest = source ? parseReleaseManifest(source) : undefined
+      if (manifest && (manifest.version !== v.version || manifest.platform !== v.platform)) throw new GuideError('INVALID_RELEASE')
+      return { ...stored, ...(manifest ? { manifest } : {}), revision: revision(v) }
+    }
     catch (e) { if (missing(e)) throw new GuideError('DRAFT_NOT_FOUND', 404); throw e }
   }
   async list() {
@@ -35,11 +44,12 @@ export class ReleaseAdmin {
     return { drafts: drafts.sort((a,b) => b.createdAt.localeCompare(a.createdAt)), releases }
   }
   async create(input: unknown) {
-    const value = parse(DraftInput, input)
+    const manifest = parseReleaseManifest((input as { manifest?: unknown } | null)?.manifest)
+    const value = parse(CreateInput, input)
     return withLock(this.drafts, '.create-lock', async () => {
       if ((await this.list()).drafts.length >= 100) throw new GuideError('DRAFT_LIMIT', 409)
       const id = randomUUID()
-      await atomicJson(this.directory(id), 'draft.json', { ...value, id, published: false, files: [], createdAt: new Date().toISOString() })
+      await atomicJson(this.directory(id), 'draft.json', { ...value, version: manifest.version, platform: manifest.platform, id, published: false, files: [], createdAt: new Date().toISOString() })
       return this.get(id)
     })
   }
@@ -55,25 +65,45 @@ export class ReleaseAdmin {
   }
   private async write(value: ReleaseDraft) {
     const { revision: ignored, ...raw } = value
-    await atomicJson(this.directory(value.id), 'draft.json', parse(DraftSchema, raw))
+    const manifest = raw.manifest ? { name: raw.manifest.name, content: raw.manifest.content } : undefined
+    await atomicJson(this.directory(value.id), 'draft.json', parse(DraftSchema, { ...raw, manifest }))
     return this.get(value.id)
   }
   async save(id: string, input: unknown, expected: unknown) {
     const value = parse(DraftInput, input)
     return this.change(id, expected, async current => {
-      if (current.files.length && (value.version !== current.version || value.platform !== current.platform)) throw new GuideError('RELEASE_ID_LOCKED', 409)
+      if (value.version !== current.version || value.platform !== current.platform) throw new GuideError('RELEASE_ID_LOCKED', 409)
       return this.write({ ...current, ...value })
+    })
+  }
+  private checkFiles(manifest: ReleaseManifest, files: ReleaseDraft['files']) {
+    if (files.some(file => !manifest.files.some(expected => expected.name === file.name && expected.size === file.size && expected.sha512 === file.sha512))) throw new GuideError('PACKAGE_CHECKSUM_MISMATCH', 409)
+  }
+  async attachManifest(id: string, input: unknown, expected: unknown) {
+    const manifest = parseReleaseManifest(input)
+    return this.change(id, expected, async current => {
+      // Once pinned, the checksum baseline is immutable. A new build needs a new draft.
+      if (current.manifest) throw new GuideError('MANIFEST_LOCKED', 409)
+      if (manifest.version !== current.version || manifest.platform !== current.platform) throw new GuideError('MANIFEST_RELEASE_MISMATCH', 409)
+      this.checkFiles(manifest, current.files)
+      for (const file of current.files) {
+        this.checkFiles(manifest, [await inspectArtifact(path.join(this.directory(id), 'files', file.name))])
+      }
+      return this.write({ ...current, manifest })
     })
   }
   async upload(id: string, name: string, req: IncomingMessage, expected: unknown) {
     return this.change(id, expected, async current => {
-      if (!FileNameSchema.safeParse(name).success || matchingArtifacts([name], current.version, current.platform).length !== 1) throw new GuideError('INVALID_PACKAGE_NAME')
+      if (!current.manifest) throw new GuideError('MANIFEST_REQUIRED')
+      const artifact = current.manifest.files.find(file => file.name === name)
+      if (!FileNameSchema.safeParse(name).success || !artifact) throw new GuideError('PACKAGE_NOT_IN_MANIFEST')
       if (current.files.some(f => f.name === name)) throw new GuideError('FILE_EXISTS', 409)
       if (current.files.length >= 8) throw new GuideError('FILE_LIMIT', 409)
       const directory = path.join(this.directory(id), 'files')
       const file = await receiveFile(req, directory, maxPackageBytes)
       let moved = false, committed = false
       try {
+        if (file.size !== artifact.size || file.sha512 !== artifact.sha512) throw new GuideError('PACKAGE_CHECKSUM_MISMATCH', 409)
         try { await lstat(path.join(directory, name)); throw new GuideError('FILE_EXISTS', 409) } catch (e) { if (!missing(e)) throw e }
         await rename(file.temp, path.join(directory, name)); moved = true
         const result = await this.write({ ...current, files: [...current.files, { name, size: file.size, sha512: file.sha512 }] })
@@ -106,6 +136,8 @@ export class ReleaseAdmin {
   }
   async publish(id: string, expected: unknown, signal: AbortSignal) {
     return this.change(id, expected, async current => {
+      if (!current.manifest) throw new GuideError('MANIFEST_REQUIRED')
+      this.checkFiles(current.manifest, current.files)
       if (!current.files.length || current.files.filter(f => f.name.endsWith(current.platform === 'windows-x64' ? '.exe' : '.zip')).length !== 1) throw new GuideError('MAIN_PACKAGE_REQUIRED')
       const existing = (await readCatalog(this.root)).releases.find(r => r.version === current.version)
       if (existing?.targets[current.platform]) {
@@ -117,7 +149,8 @@ export class ReleaseAdmin {
       }
       if (existing && (existing.title !== current.title || JSON.stringify(existing.notes) !== JSON.stringify(current.notes))) throw new GuideError('RELEASE_NOTES_MISMATCH', 409)
       try {
-        const result = await publishRelease({ root: this.root, input: path.join(this.directory(id), 'files'), version: current.version, platform: current.platform, notes: { title: current.title, notes: current.notes }, signal, expectedArtifacts: current.files })
+        const expectedArtifacts = current.manifest.files.filter(file => current.files.some(uploaded => uploaded.name === file.name))
+        const result = await publishRelease({ root: this.root, input: path.join(this.directory(id), 'files'), version: current.version, platform: current.platform, notes: { title: current.title, notes: current.notes }, signal, expectedArtifacts })
         await this.write({ ...current, published: true }); return result
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new GuideError('CONTENT_BUSY', 409)

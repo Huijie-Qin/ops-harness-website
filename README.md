@@ -77,7 +77,11 @@ pnpm start
 
 ## 发布安装包
 
-网页操作：登录 `/admin` → 发布包 → 新建发布，填写版本、平台、标题和 changelog（每行一条）。保存草稿后上传软件包，核对文件清单及 SHA-512，再点击“核对并发布”。上传支持进度与取消，每文件最多 2 GiB，每个平台最多 8 个文件。同版本的两个平台各建一个草稿，并保持标题、说明一致。大于 2 GiB 的包仍可使用 CLI（上限 20 GiB）。
+网页操作：登录 `/admin` → 发布包 → 新建发布，先选择与安装包同一次打包生成的 `latest.yml`（macOS 为 `latest-mac.yml`）。服务端自动提取版本、平台、文件名、大小和 SHA-512；填写标题和 changelog（每行一条），保存草稿后上传清单中的软件包。文件大小或 SHA-512 不匹配时拒收并清理此次临时文件，校验通过后才可“核对并发布”；发布前重新读取文件校验。版本与校验清单在保存草稿后锁定，无需手动输入版本。上传支持进度与取消，每文件最多 2 GiB，每个平台最多 8 个文件。同版本的两个平台各建一个草稿，并保持标题、说明一致；界面会沿用已发布平台的说明。大于 2 GiB 的包仍可使用 CLI（上限 20 GiB）。
+
+描述文件最多 32 KiB，必须包含 `version` 和 `files[]` 中每个文件的 `url`、`size`、Base64 `sha512`。只接收当前支持平台的本地文件名，不访问 YAML 内的远程地址。只需上传更新 YAML，不需要 `builder-debug.yml`、`builder-effective-config.yaml` 或 `.blockmap`。网页只接受清单中列出的软件包，主更新包必需，清单中的其他软件包可选；未列入清单的 portable ZIP 等附件仍可通过 CLI 发布。旧草稿保留，须补充匹配版本和平台的描述文件，并核对已有文件后才能继续上传或发布；已发布版本仍可维护说明与上下架。原始描述文件内容保存在草稿 JSON 中，随草稿一起保留或移入回收目录。
+
+此校验保证上传与发布的字节匹配打包清单，不代替数字签名或目标平台安装测试。CLI 保留原有本地发布流程，计算真实文件哈希，但不要求导入打包描述文件。详见 [ADR 0017](docs/adr/0017-manifest-first-release-upload.md)。
 
 已发布版本可修改标题、更新说明、上下架状态；安装包不可覆盖。草稿及其文件可移至本地回收目录。发布瞬间参与当前自动更新策略，网页新版本默认立即发布、100% 灰度；更细的发布时间、最低版本与灰度策略继续使用 CLI/受控目录维护。
 
@@ -121,7 +125,9 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | GET/PUT /api/admin/navigation | 分组、章节顺序与隐藏配置 |
 | GET/POST /api/admin/images | 图片库及原始二进制上传（name 查询参数） |
 | GET/HEAD /media/:sha256.:ext | 受控图片公开读取 |
-| GET/POST /api/admin/releases | 发布清单 / 新建草稿 |
+| POST /api/admin/releases/manifest | 校验打包描述文件并预览版本、平台和文件清单（不创建草稿） |
+| GET/POST /api/admin/releases | 发布清单 / 用描述文件和更新说明新建草稿 |
+| PUT /api/admin/releases/drafts/:id/manifest | 为旧草稿补充描述文件并校验已有文件，需 revision |
 | GET/PUT/DELETE /api/admin/releases/drafts/:id | 读取、更新、移除草稿 |
 | POST/DELETE /api/admin/releases/drafts/:id/files?name=... | 上传、移除软件包；上传使用 X-Revision |
 | POST /api/admin/releases/drafts/:id/publish | 确认发布草稿 |
