@@ -102,19 +102,51 @@ test('reader does not execute raw HTML or unsafe links and uses controlled image
   assert.ok(html.includes('src="/assets/product/tools.jpg"'));assert.ok(html.includes('&lt;script&gt;'))
 })
 
-async function httpFixture(t:TestContext,password:string|undefined='test-password-for-guide-only') {
+async function httpFixture(t:TestContext,password:string|undefined='test-password-for-guide-only',websiteUrl?:string) {
   const {store,root}=await fixture(t)
   let clock=Date.now()
   const server=createServer();server.listen(0,'127.0.0.1');await once(server,'listening')
   t.after(async()=>{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()))})
   const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`
+  websiteUrl??=origin
   await writeFile(path.join(root,'index.html'),'<html><body>test</body></html>')
-  const guide=await createGuideHandler(store,{origin,password,now:()=>clock})
-  server.on('request',createHandler({schemaVersion:1,websiteUrl:origin,host:'127.0.0.1',port:4173,releaseDirectory:path.join(root,'releases'),contentDirectory:path.join(root,'state'),adminPasswordEnv:'DSH_OPS_WEBSITE_ADMIN_PASSWORD',configPath:'test'},{clientRoot:root,guide,adminIconHash:iconHash}))
-  const send=(route:string,data:unknown,headers:Record<string,string>={},method='POST')=>fetch(origin+route,{method,headers:{Origin:origin,'Content-Type':'application/json',...headers},body:JSON.stringify(data)})
+  const guide=await createGuideHandler(store,{origin:websiteUrl,password,now:()=>clock})
+  server.on('request',createHandler({schemaVersion:1,websiteUrl,host:'127.0.0.1',port:4173,releaseDirectory:path.join(root,'releases'),contentDirectory:path.join(root,'state'),adminPasswordEnv:'DSH_OPS_WEBSITE_ADMIN_PASSWORD',configPath:'test'},{clientRoot:root,guide,adminIconHash:iconHash}))
+  // Node fetch replaces Host; use node:http to exercise the configured external origin on loopback.
+  const request=(route:string,headers:Record<string,string>={},method='GET',body?:string)=>new Promise<Response>((resolve,reject)=>{
+    const req=httpRequest(origin+route,{method,headers:{Host:new URL(websiteUrl).host,...headers}},res=>{
+      const chunks:Buffer[]=[]
+      res.on('data',chunk=>chunks.push(Buffer.from(chunk)))
+      res.on('error',reject)
+      res.on('end',()=>resolve(new Response(Buffer.concat(chunks),{status:res.statusCode!,headers:res.headers as Record<string,string>})))
+    })
+    req.on('error',reject)
+    req.end(body)
+  })
+  const send=(route:string,data:unknown,headers:Record<string,string>={},method='POST')=>request(route,{Origin:websiteUrl,'Content-Type':'application/json',...headers},method,JSON.stringify(data))
   async function login(){const response=await send('/api/admin/login',{password});assert.equal(response.status,200);const body=await response.json();return {Cookie:response.headers.get('set-cookie')!.split(';')[0]!, 'X-CSRF-Token':body.csrf}}
-  return {store,origin,send,login,advance:(duration:number)=>{clock+=duration}}
+  return {store,origin,send,login,request,advance:(duration:number)=>{clock+=duration}}
 }
+test('internal HTTP and HTTPS origins retain usable cookies, Host, Origin and CSRF checks',async t=>{
+  for(const websiteUrl of ['http://7.192.170.132:4173','https://docs.example.com'])await t.test(websiteUrl,async t=>{
+    const password='test-password-for-guide-only'
+    const {request,send}=await httpFixture(t,password,websiteUrl)
+    const response=await send('/api/admin/login',{password})
+    assert.equal(response.status,200)
+    const cookie=response.headers.get('set-cookie')!
+    assert.ok(cookie.includes('HttpOnly'))
+    assert.ok(cookie.includes('SameSite=Strict'))
+    assert.equal(cookie.includes('; Secure'),websiteUrl.startsWith('https:'))
+    const headers={Cookie:cookie.split(';')[0]!,Host:new URL(websiteUrl).host,'X-CSRF-Token':(await response.json()).csrf}
+    const base=(await (await request('/api/admin/guides/start',headers)).json()).chapter
+    const data={chapter:{...draft,title:'内网 HTTP 保存'},revision:base.revision}
+    assert.equal((await send('/api/admin/guides/start',data,{...headers,Host:'wrong.example'},'PUT')).status,403)
+    assert.equal((await send('/api/admin/guides/start',data,{...headers,Origin:'http://wrong.example'},'PUT')).status,403)
+    assert.equal((await send('/api/admin/guides/start',data,{...headers,'X-CSRF-Token':''},'PUT')).status,403)
+    assert.equal((await send('/api/admin/guides/start',data,headers,'PUT')).status,200)
+    assert.equal((await send('/api/admin/guides/start',data,headers,'PUT')).status,409)
+  })
+})
 test('admin login, publish, history restore and logout enforce real sessions and CSRF',async t=>{
   const {origin,send,login}=await httpFixture(t)
   assert.equal((await fetch(origin+'/api/admin/guides')).status,401)

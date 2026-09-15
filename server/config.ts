@@ -2,8 +2,16 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import { ReleaseConfigSchema } from '@dsh-ops/release-contract'
+import { normalizeWebsiteUrl } from './website-url.js'
 
 const WebsiteConfigSchema = ReleaseConfigSchema.extend({
+  websiteUrl: z.string().max(2048).transform((value, ctx) => {
+    try { return normalizeWebsiteUrl(value) }
+    catch {
+      ctx.addIssue({ code: 'custom', message: 'websiteUrl must be an HTTP or HTTPS origin without credentials, a subpath, query or fragment' })
+      return z.NEVER
+    }
+  }),
   contentDirectory: z.string().refine(value => value.trim().length > 0),
   adminPasswordEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
 })

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@dsh-ops/release-contract':
-        specifier: file:vendor/dsh-ops-release-contract-0.1.0.tgz
-        version: file:vendor/dsh-ops-release-contract-0.1.0.tgz
+        specifier: file:vendor/dsh-ops-release-contract-0.1.1.tgz
+        version: file:vendor/dsh-ops-release-contract-0.1.1.tgz
       markdown-it:
         specifier: 15.0.2
         version: 15.0.2
@@ -68,9 +68,9 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.0.tgz':
-    resolution: {integrity: sha512-8fzxGdXfYovq5IgFCesP/jUS17h19lqQXv+XCw/Rr2hqbEb94bcLVNJenGn91uu+gj5/KB9e8CZzRzJtTboeQQ==, tarball: file:vendor/dsh-ops-release-contract-0.1.0.tgz}
-    version: 0.1.0
+  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.1.tgz':
+    resolution: {integrity: sha512-1lSQUPujZzrZwxgiOpUF0/GdIEp39IKCxZHw32uAYTMiBEpaxRmUpLLn4F4wwzvgWQejpB9ye0oK4KulByuLyg==, tarball: file:vendor/dsh-ops-release-contract-0.1.1.tgz}
+    version: 0.1.1
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -643,7 +643,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.0.tgz':
+  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.1.tgz':
     dependencies:
       semver: 7.8.5
       zod: 4.4.3

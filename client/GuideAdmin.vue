@@ -48,13 +48,17 @@ async function save(){
 }
 async function saveNavigation(value:Navigation){navigationDoc.value=await call<NavigationDocument>('/api/admin/navigation',{method:'PUT',data:{navigation:value,revision:navigationDoc.value.revision}});await list();notice.value='目录已保存，阅读页已更新。'}
 function swap<T>(items:T[],index:number,next:number){if(index>=0&&next>=0&&next<items.length)[items[index],items[next]]=[items[next]!,items[index]!]}
+function newContentId(){
+  // getRandomValues also works on internal HTTP origins, unlike randomUUID.
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('')
+}
 function manageAction(type:string,id:string,groupId:string){
   if(allBusy.value)return
   if(type==='archive-document'){archive(id);return}
   if(['create-document','create-directory','rename-directory','edit-document','move-document'].includes(type)){
     error.value='';notice.value=''
     const chapter=chapters.value.find(c=>c.id===id)
-    managementDialog.value={type,id,groupId,value:type==='rename-directory'?navigationDoc.value.groups.find(g=>g.id===id)!.title:type==='edit-document'?chapter!.title:type==='move-document'?groupId:'',summary:chapter?.summary??'',documentId:`doc-${crypto.randomUUID()}`}
+    managementDialog.value={type,id,groupId,value:type==='rename-directory'?navigationDoc.value.groups.find(g=>g.id===id)!.title:type==='edit-document'?chapter!.title:type==='move-document'?groupId:'',summary:chapter?.summary??'',documentId:`doc-${newContentId()}`}
     return
   }
   const perform=()=>void run(async()=>{
@@ -83,7 +87,7 @@ async function submitManagementDialog(){const item=managementDialog.value;if(!it
     if(draft.value?.id===item.id)adopt(result.chapter);await list();notice.value='文档名称与简介已保存。'
   }else{
     const {revision,...value}=JSON.parse(JSON.stringify(navigationDoc.value)) as NavigationDocument
-    if(item.type==='create-directory')value.groups.push({id:crypto.randomUUID(),title:item.value.trim(),chapters:[]})
+    if(item.type==='create-directory')value.groups.push({id:newContentId(),title:item.value.trim(),chapters:[]})
     else if(item.type==='rename-directory')value.groups.find(g=>g.id===item.id)!.title=item.value.trim()
     else {const source=value.groups.find(g=>g.id===item.groupId)!,target=value.groups.find(g=>g.id===item.value)!;source.chapters=source.chapters.filter(id=>id!==item.id);target.chapters.push(item.id)}
     await saveNavigation(value)

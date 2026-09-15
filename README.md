@@ -6,6 +6,8 @@
 
 ## 本地运行
 
+代码 clone 到新服务器后，请按 [Ubuntu / Debian 简明部署手册](docs/runbooks/website-deployment-ubuntu-debian.md) 完成环境安装、配置、构建与启动。
+
 在仓库根目录执行（Node.js 24、pnpm 11.19.0）：
 
 ```sh
@@ -69,7 +71,9 @@ pnpm start
 
 从旧配置迁移时，将原 `config/releases.json` 和 `config/website-content.json` 的字段合并到一份 `website.json`，仅保留一个 `schemaVersion`。如果新文件位置改变，应同步调整两个存储目录的相对路径，确保仍指向原数据；无需移动在线内容或发布归档。将官网进程原来的 `DSH_OPS_RELEASE_CONFIG` / `DSH_OPS_WEBSITE_CONTENT_CONFIG` 替换为 `DSH_OPS_WEBSITE_CONFIG` 后重启。只设置旧变量时服务和 CLI 会提示迁移并停止，不会静默改用默认目录。密码环境变量保持原名称。配置修改需要重启服务才能生效。
 
-`websiteUrl` 只接受 HTTPS 源地址或 loopback HTTP，不接受账号密码、子路径、查询串。以后有域名时修改此值并重启官网，同时更新产品仓库的 `config/releases.json`；Desktop 打包复制的是产品仓库中的配置，两个仓库的配置不会自动同步。Desktop 仍使用原发布配置格式，不能直接使用官网合并后的 JSON。已经安装的版本需要配置文件覆盖（Desktop 侧仍通过 `DSH_OPS_RELEASE_CONFIG`）或手动安装包含新地址的版本，地址不会远程自动迁移。`host` 与 `port` 控制本地监听，不能只修改 websiteUrl 而不准备对应的服务。公网部署应由网关提供 TLS，并保留此服务的 loopback 监听。
+`websiteUrl` 接受 HTTP 或 HTTPS 源地址，包括内网 IP 和域名，不接受账号密码、子路径、查询串或 fragment；填写纯 URL，不要使用 Markdown 链接格式。`host` 与 `port` 控制实际监听，默认仍为 loopback。内网直连可将 `websiteUrl` 设为 `http://7.192.170.132:4173`，`host` 设为服务器网卡上的 `7.192.170.132`，`port` 保持 `4173`；浏览器也必须使用完全相同的协议、地址与端口。管理员密码要求、Host/Origin、CSRF 和 revision 校验继续生效。HTTP 不加密传输，此方式用于受控内网；公网部署仍应由 HTTPS 网关提供 TLS，并保留 Node 服务的 loopback 监听。仅把 `websiteUrl` 改成 HTTPS 不会自动启用 TLS。
+
+以后更换地址时修改此值并重启官网，同时更新产品 Bundle 的 `ops-workbench.config.websiteUrl` 并重新构建客户端；Desktop 从实际加载的 Workbench 配置读取地址，不再使用产品 `config/releases.json` 或 `DSH_OPS_RELEASE_CONFIG`。两边的协议、主机与端口必须一致。共享发布协议 0.1.1 已统一支持 HTTP 和 HTTPS，官网直接使用同一校验器。旧安装包仍执行原 HTTPS / loopback 限制，须通过旧版可用更新源或手动安装升级到包含此改动的客户端后，才能切换到非回环 HTTP 地址；官网修改不会自动迁移旧客户端地址。
 
 ## 发布安装包
 
@@ -153,7 +157,7 @@ pnpm check
 pnpm build
 ```
 
-运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.0 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
+运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
 
 Windows x64 上的真实 Desktop 更新烟测由产品仓库执行：先在官网运行 `pnpm build`，再在产品仓库设置 `DSH_OPS_WEBSITE_PROJECT` 为官网的绝对路径并运行 `pnpm desktop:smoke:updates`。这只用于跨仓库集成验收，日常运行不需要该变量。
 

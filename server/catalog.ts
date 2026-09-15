@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
-  archiveUrl, CatalogSchema, compareVersions, isPrerelease, releaseNotesUrl,
+  CatalogSchema, compareVersions, isPrerelease,
   type Release, type ReleaseCatalog, type ReleasePlatform, type UpdateDecision,
 } from '@dsh-ops/release-contract'
+import { archiveUrl, releaseNotesUrl } from './website-url.js'
 
 const MAX_CATALOG_BYTES = 2 * 1024 ** 2
 export async function readCatalog(root: string): Promise<ReleaseCatalog> {

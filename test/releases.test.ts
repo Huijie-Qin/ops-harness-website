@@ -10,6 +10,7 @@ import { CatalogSchema, validateUpdateDecision, type ReleaseCatalog } from '@dsh
 import { decideUpdate, readCatalog, rolloutBucket } from '../server/catalog.js'
 import { createHandler } from '../server/app.js'
 import { publishRelease } from '../server/publish.js'
+import { loadConfig } from '../server/config.js'
 
 const installationId = 'fa77c08d-abdf-4c98-a5ad-0820a38e1e81'
 const artifact = { name: 'WiseOperation Assistant Setup 0.2.0.exe', size: 10, sha512: 'A'.repeat(86) + '==' }
@@ -86,6 +87,30 @@ test('HTTP rejects malformed queries/writes and never builds links from attacker
   assert.equal((await fetch(`${origin}/api/releases`, { method: 'POST' })).status, 405)
   const body = await (await fetch(`${origin}/api/releases`, { headers: { 'X-Forwarded-Host': 'evil.example' } })).json()
   assert.ok(body.releases[0].downloads[0].url.startsWith(origin))
+})
+test('configured internal HTTP origin serves release links, metadata and downloads', async t => {
+  const websiteUrl = 'http://7.192.170.132:4173'
+  const configPath = path.join(root, 'internal-http.json')
+  await writeFile(configPath, JSON.stringify({ schemaVersion: 1, websiteUrl, host: '127.0.0.1', port: 4173, releaseDirectory: 'releases', contentDirectory: 'content', adminPasswordEnv: 'DSH_OPS_WEBSITE_ADMIN_PASSWORD' }))
+  const internalServer = createServer(createHandler(await loadConfig(configPath), { clientRoot: root }))
+  internalServer.listen(0, '127.0.0.1')
+  await once(internalServer, 'listening')
+  t.after(async () => { internalServer.closeAllConnections(); await new Promise<void>(resolve => internalServer.close(() => resolve())) })
+  const transportOrigin = `http://127.0.0.1:${(internalServer.address() as { port: number }).port}`
+  const list = await fetch(transportOrigin + '/api/releases', { headers: { Host: 'wrong.example', 'X-Forwarded-Host': 'wrong.example' } })
+  assert.equal(list.status, 200)
+  const download = (await list.json()).releases[0].downloads[0].url
+  assert.equal(download, `${websiteUrl}/updates/archive/0.2.0/windows-x64/${encodeURIComponent(artifact.name)}`)
+  assert.deepEqual(Buffer.from(await (await fetch(transportOrigin + new URL(download).pathname)).arrayBuffer()), bytes)
+  const check = await fetch(`${transportOrigin}/api/releases/check?${new URLSearchParams(query)}`)
+  assert.equal(check.status, 200)
+  const decision = validateUpdateDecision(await check.json(), websiteUrl, query.currentVersion, query.platform)
+  assert.ok(decision.updateAvailable)
+  assert.equal(decision.feedUrl, `${websiteUrl}/updates/archive/0.2.0/windows-x64/`)
+  assert.equal(decision.releaseNotesUrl, `${websiteUrl}/releases#v0.2.0`)
+  const metadata = await fetch(transportOrigin + new URL(decision.feedUrl).pathname + 'latest.yml')
+  assert.equal(metadata.status, 200)
+  assert.equal(parse(await metadata.text()).files[0].sha512, decision.artifact.sha512)
 })
 test('product screenshots retain original JPEG bytes and MIME type in production', async () => {
   const directory = path.join(root, 'assets', 'product')

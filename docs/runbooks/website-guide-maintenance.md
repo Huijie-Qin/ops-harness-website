@@ -18,7 +18,7 @@ pnpm dev
 
 打开 `/admin` 登录。登录会话最长 8 小时，闲置 30 分钟、退出或服务重启后失效。认证前只显示登录页，不加载编辑器和其他管理工作区。更换环境中的密码并重启可轮换凭据。未配置密码时页面显示配置说明，公开阅读仍可使用。
 
-生产部署在 HTTPS 网关后运行，`config/website.json` 的 `websiteUrl` 必须与浏览器访问的源一致；管理接口校验 Host 和 Origin，不要混用 localhost、127.0.0.1 或不同域名。
+公网生产部署在 HTTPS 网关后运行；受控内网也可显式配置 HTTP IP / 域名直连，见 [简明部署手册](website-deployment-ubuntu-debian.md)。`config/website.json` 的 `websiteUrl` 必须与浏览器访问的协议、地址、端口一致；管理接口校验 Host 和 Origin，不要混用 localhost、127.0.0.1 或不同域名。内网 HTTP 仍要求 16–256 位管理员密码；HTTP Cookie 保留 HttpOnly / SameSite，HTTPS 时额外启用 Secure。
 
 ## 日常编辑
 

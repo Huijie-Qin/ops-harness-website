@@ -54,8 +54,20 @@ test('unified configuration preserves strict release and content validation', as
   const root = await mkdtemp(path.join(tmpdir(), 'website-config-validation-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const configPath = path.join(root, 'website.json')
+  for (const websiteUrl of [
+    'http://7.192.170.132:4173/', 'http://192.168.1.20:4173', 'http://intranet.example:80/',
+    'http://intranet.example:443/', 'http://[fd00::1]:4173/', 'https://EXAMPLE.com:443/',
+  ]) {
+    await writeFile(configPath, JSON.stringify({ ...externalConfig, websiteUrl }))
+    assert.equal((await loadConfig(configPath)).websiteUrl, new URL(websiteUrl).origin)
+  }
   for (const invalid of [
-    { schemaVersion: 2 }, { websiteUrl: 'http://example.com' }, { websiteUrl: 'https://example.com/guide' },
+    { schemaVersion: 2 }, { websiteUrl: 'ftp://example.com' }, { websiteUrl: 'https://example.com/guide' },
+    { websiteUrl: 'http://7.192.170.132:4173/guide' }, { websiteUrl: 'http://user:pass@example.com' },
+    { websiteUrl: 'http://example.com?query=1' }, { websiteUrl: 'http://example.com#fragment' },
+    { websiteUrl: '[http://example.com](http://example.com)' }, { websiteUrl: '7.192.170.132:4173' },
+    { websiteUrl: 'https://user:pass@example.com' }, { websiteUrl: 'https://example.com?query=1' },
+    { websiteUrl: 'https://example.com#fragment' }, { websiteUrl: 'http://' + 'a'.repeat(2048) },
     { port: 0 }, { releaseDirectory: '' }, { contentDirectory: undefined }, { contentDirectory: '  ' },
     { adminPasswordEnv: undefined }, { adminPasswordEnv: 'invalid-name' }, { password: 'must-not-be-stored' },
   ]) {
@@ -71,7 +83,7 @@ test('release CLI uses unified environment configuration and an explicit overrid
   t.after(() => rm(root, { recursive: true, force: true }))
   const project = fileURLToPath(new URL('../', import.meta.url))
   const envConfig = path.join(root, 'environment.json'), explicitConfig = path.join(root, 'explicit.json')
-  await writeFile(envConfig, JSON.stringify({ ...externalConfig, releaseDirectory: 'env-releases', contentDirectory: 'docs' }))
+  await writeFile(envConfig, JSON.stringify({ ...externalConfig, websiteUrl: 'http://7.192.170.132:4173', releaseDirectory: 'env-releases', contentDirectory: 'docs' }))
   await writeFile(explicitConfig, JSON.stringify({ ...externalConfig, releaseDirectory: 'explicit-releases', contentDirectory: 'docs' }))
   const input = path.join(root, 'input'), notes = path.join(root, 'notes.json')
   await mkdir(input)
