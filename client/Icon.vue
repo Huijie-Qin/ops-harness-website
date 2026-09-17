@@ -10,6 +10,8 @@ const paths: Record<string, string> = {
   person: 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM4 21v-2a8 8 0 0 1 16 0v2',
   shield: 'm12 3 8 3v5c0 5-4 8-8 10-4-2-8-5-8-10V6Zm-4 9 3 3 5-5',
   clock: 'M12 8v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
+  mail: 'M3 5h18v14H3ZM3 6l9 7 9-7',
+  chat: 'M4 4h16v12H9l-5 4ZM8 8h8M8 12h5',
   grid: 'M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z',
   windows: 'M3 5 10 4v7H3Zm10-1 8-1v8h-8ZM3 13h7v7l-7-1Zm10 0h8v8l-8-1Z',
   laptop: 'M5 4h14v12H5ZM3 20h18l-2-4H5Z',

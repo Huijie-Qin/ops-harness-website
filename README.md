@@ -1,4 +1,4 @@
-# 办公助手官网
+# 终端云工作助手官网
 
 独立 Node.js + TypeScript + Vue 3 项目，包含产品介绍、使用指南、更新说明与 Desktop 发布服务。它不承载 DSH 业务 Runtime，也不读取 DSH_HOME。
 
@@ -31,7 +31,7 @@ pnpm start
 ## 首页与使用指南
 
 - `client/HeroAtmosphere.vue`：参考 [DeepSeek Harness 官网](https://www.deepseek.com/harness/) 的蓝色光场与点阵空间感，自行实现 Canvas 动画。鼠标移动带动柔光、扩散涟漪与点阵视差/避让；支持暂停、系统减少动态效果偏好，以及离开可见区域/后台时停止刷新；不加载外部动画脚本。
-- `client/WorkspacePreview.vue` / `ProductShot.vue`：展示真实项目的工具市场、我的技能、我的专家截图，支持键盘切换和查看原图。截图保存在 `public/assets/product/`，由开发与生产服务统一提供 `/assets/product/` 路径。
+- `client/WorkspacePreview.vue` / `ProductShot.vue`：首页仅展示“目标 · 待办”，以今日重点、日程、邮件和行动建议为介绍重点，支持查看原图。展示图保存在 `public/assets/product/`，由开发与生产服务统一提供 `/assets/product/` 路径。工具市场、我的技能、我的专家暂不在首页介绍，其既有指南内容与配图保留。
 - `content/guide/*.md`：11 个独立 Markdown 章节，包含操作步骤、完成标志、示例与常见问题。更新功能时同步核对对应插件 README 和实际界面，不能将待接入能力描述为已经可用。
 - `client/GuidePage.vue`：全文搜索、分组目录、前后章导航和示例复制。支持章节链接及原有 `#step-1` 至 `#step-4` 链接。
 
@@ -43,9 +43,11 @@ pnpm start
 
 编辑器仅在管理员页面加载，附属资源由 `scripts/prepare-assets.mjs` 从锁定的 npm 包复制到本站，生成目录不提交 Git。`scripts/copy-guide.mjs` 将 `content/guide`（包含 `navigation.json`）及 `content/media` 复制到生产构建中。图片继续使用 `/media/<sha256>.<ext>` 地址，在线目录没有该文件时读取构建中的图片。
 
-### 实拍截图维护
+### 产品展示图维护
 
-当前三张 JPEG 于 2026-09-13 从产品仓库 ops-harness 完成 `pnpm local:bootstrap` 后的真实 Web Runtime 采集；源码基线为 `c75716f`，Profile 为 `web`，运行数据位于仓库 `.runtime/dsh-home`，访问地址为 `http://127.0.0.1:3081/`。图片尺寸均为 1470 × 746。
+首页 `goals-todos.jpg` 于 2026-09-17 使用产品仓库 `packages/features/my-todos/src/client.js` 的实际页面组件，在独立浏览器环境中注入固定示例数据后采集，尺寸为 1470 × 980。产品源码基线为 `128d494bb9a8114702ff131674efdf1b14228c2e`。页面标明“界面示例”，不读取真实账号、邮件、日程、会话或 Desktop 状态，不启动 DSH；官网运行不依赖产品源码或 React。当前介绍不承诺独立目标创建、关键结果或进度管理。
+
+指南保留的三张 JPEG 于 2026-09-13 从产品仓库 ops-harness 完成 `pnpm local:bootstrap` 后的真实 Web Runtime 采集；源码基线为 `c75716f`，Profile 为 `web`，运行数据位于仓库 `.runtime/dsh-home`，访问地址为 `http://127.0.0.1:3081/`。图片尺寸均为 1470 × 746。
 
 | 文件 | 实际采集页面 |
 | --- | --- |
@@ -53,7 +55,7 @@ pnpm start
 | skills.jpg | SKILL 市场 → 我的技能 → 系统内置 |
 | experts.jpg | 专家 → 我的专家 |
 
-截图为浏览器内容原图，未用生成图片或重建 UI 替代。采集前折叠会话分组，避免展示私人会话标题；不得展示凭据、登录二维码、个人资料或敏感业务内容。页面中的工具状态与数量是该次运行的实际状态，不作为默认安装状态承诺。界面更新后按相同入口重新采集、检查内容并同步替换首页与指南共用的资源。
+以上指南截图为浏览器内容原图，未用生成图片或重建 UI 替代。采集前折叠会话分组，避免展示私人会话标题；不得展示凭据、登录二维码、个人资料或敏感业务内容。页面中的工具状态与数量是该次运行的实际状态，不作为默认安装状态承诺。界面更新后按相同入口重新采集、检查内容并同步替换首页与指南共用的资源。
 
 ## 配置
 

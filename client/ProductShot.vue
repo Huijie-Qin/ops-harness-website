@@ -1,9 +1,9 @@
 <script setup lang="ts">
-defineProps<{ src: string; alt: string; caption: string; eager?: boolean }>()
+withDefaults(defineProps<{ src: string; alt: string; caption: string; eager?: boolean; width?: number; height?: number }>(), { width: 1470, height: 746 })
 </script>
 <template>
   <figure class="product-shot">
-    <a :href="src" target="_blank" rel="noopener" :aria-label="`${caption}，在新标签页查看原图`"><img :src="src" :alt="alt" width="1470" height="746" :loading="eager ? 'eager' : 'lazy'" decoding="async" /></a>
+    <a :href="src" target="_blank" rel="noopener" :aria-label="`${caption}，在新标签页查看原图`"><img :src="src" :alt="alt" :width="width" :height="height" :loading="eager ? 'eager' : 'lazy'" decoding="async" /></a>
     <figcaption><span>{{ caption }}</span><a :href="src" target="_blank" rel="noopener">查看原图<span class="sr-only">（在新标签页打开）</span></a></figcaption>
   </figure>
 </template>
