@@ -116,6 +116,9 @@ content/media/                # 同步后的图片和 index.json
 .runtime/website-content/guide/history/    # 被替换的版本，按章节和 revision 分文件
 .runtime/website-content/guide/navigation.json # 在线目录配置
 .runtime/website-content/media/            # 上传图片与 index.json
+.runtime/website-content/knowledge/catalog.json  # 指标知识库元数据目录
+.runtime/website-content/knowledge/skills/       # 按内容哈希保存的技能文件
+.runtime/website-content/knowledge/.trash/       # 覆盖或删除前的目录副本
 .runtime/website-releases/.admin-drafts/    # 发布草稿和上传文件
 .runtime/website-releases/archive/          # 不可变发布文件
 .runtime/website-releases/catalog.json      # 版本说明、策略和下载清单
@@ -127,6 +130,8 @@ content/media/                # 同步后的图片和 index.json
 某章存在在线版本时，后续 Git 基线变动不会自动替换它。管理员可“下载已保存的 Markdown”，或使用下述同步功能写回源码；日常保存不自动反向同步。需要重新跟随 Git 时，先备份并核对两个版本、停止服务，将对应 `current/<id>.md` 移到内容目录外的备份处，重启后验证。不要直接删除在线目录或历史。
 
 写入使用独占锁和原子替换。异常退出留下 `guide/.write-lock` 时，先确认没有其他写入进程、备份数据，再处理残留锁；服务不擅自解锁。内容损坏时明确报错并保留原文件，不用基线静默覆盖人工修改。
+
+`knowledge/` 只存在于运行目录，不参与“同步到 content”、不进 Git，也没有 Git 基线可回退，因此必须整目录备份：`catalog.json` 是指标知识库元数据的唯一权威副本，`skills/<sha256>.<zip|md>` 是端侧下载的技能文件字节，两者必须一起备份和一起恢复，否则条目会指向缺失的哈希，公开下载接口报 404。覆盖或删除条目前服务会把旧目录复制到 `knowledge/.trash/catalog-<时间戳>.json`，可用于人工回滚；这些副本不会自动清理，容量规划时按条目数和技能文件累积估算，删除条目不回收 `skills/` 中的文件。异常退出留下 `knowledge/.knowledge-lock` 时，同样先确认没有活动写入进程并备份，再由维护人员处理。`catalog.json` 损坏时接口返回 503 并保留原文件，不要用空目录覆盖——先从备份或 `.trash/` 副本恢复并核对 `revision` 变化。
 
 ## 同步到 content 并提交主仓
 

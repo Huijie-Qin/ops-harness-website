@@ -3,10 +3,34 @@ import { ReleaseAdmin } from './release-admin.js'
 import { MediaStore } from './media-store.js'
 import type { ContentSync } from './content-sync.js'
 import { GuideError } from './guide-store.js'
+import type { KnowledgeStore } from './knowledge-store.js'
 import { parseReleaseManifest } from './release-manifest.js'
 
-export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync): AdminHandler {
+export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync, knowledge?: KnowledgeStore): AdminHandler {
   return async (req, res, url, { json, method, body }) => {
+    if (url.pathname === '/api/admin/knowledge' || url.pathname.startsWith('/api/admin/knowledge/')) {
+      if (!knowledge) throw new GuideError('CONTENT_UNAVAILABLE', 503)
+      if (url.pathname === '/api/admin/knowledge') {
+        method(req, ['GET', 'POST'])
+        if (req.method === 'GET') json(res, await knowledge.list())
+        else { const data = await body(req); json(res, await knowledge.create(data.entry, data.revision)) }
+        return true
+      }
+      const target = /^\/api\/admin\/knowledge\/([^/]+)(?:\/(skill))?$/.exec(url.pathname)
+      if (!target) throw new GuideError('NOT_FOUND', 404)
+      const id = decodeURIComponent(target[1]!)
+      if (target[2] === 'skill') {
+        method(req, ['POST', 'DELETE'])
+        json(res, req.method === 'POST'
+          ? await knowledge.attachSkill(id, url.searchParams.get('name') ?? '', req, req.headers['x-revision'])
+          : await knowledge.detachSkill(id, (await body(req)).revision))
+        return true
+      }
+      method(req, ['PUT', 'DELETE'])
+      const data = await body(req)
+      json(res, req.method === 'PUT' ? await knowledge.update(id, data.entry, data.revision) : await knowledge.remove(id, data.revision))
+      return true
+    }
     if (url.pathname === '/api/admin/content-sync') {
       method(req, ['GET', 'POST'])
       if (!sync) throw new GuideError('CONTENT_SYNC_UNAVAILABLE', 503)
