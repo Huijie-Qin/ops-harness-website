@@ -8,6 +8,7 @@ import { readAdminPassword } from './guide-config.js'
 import { GuideStore } from './guide-store.js'
 import { MediaStore } from './media-store.js'
 import { ReleaseAdmin } from './release-admin.js'
+import { KnowledgeStore } from './knowledge-store.js'
 import { createAdminHandler } from './admin-http.js'
 import { createGuideHandler } from './guide-http.js'
 import { ContentSync } from './content-sync.js'
@@ -21,7 +22,8 @@ const seedContent = path.resolve(dev ? 'content' : 'dist/content')
 const media = new MediaStore(config.contentDirectory, seedContent)
 const guides = new GuideStore(path.join(seedContent, 'guide'), config.contentDirectory)
 const sync = new ContentSync(guides, media, path.resolve('content'))
-const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync) })
+const knowledge = new KnowledgeStore(config.contentDirectory)
+const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge) })
 const guide: typeof guideApi = async (req, res, url) => await media.serve(req, res, url) || await guideApi(req, res, url)
 const server = createServer()
 const vite = dev ? await (await import('vite')).createServer({
@@ -30,6 +32,7 @@ const vite = dev ? await (await import('vite')).createServer({
 server.on('request', createHandler(config, {
   clientRoot: path.resolve('dist/client'),
   guide,
+  knowledge,
   ...(adminIconHash ? { adminIconHash } : {}),
   ...(vite ? { dev: vite.middlewares } : {}),
   onError: error => console.error('[website] request failed:', error instanceof Error ? error.name : 'UnknownError'),

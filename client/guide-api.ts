@@ -8,7 +8,7 @@ const messages: Record<string, string> = {
   PACKAGE_CHECKSUM_MISMATCH: '文件校验失败：大小或 SHA-512 与打包描述文件不一致。此次上传未保存，请使用同一次打包的原始文件重试；旧草稿请先移除不匹配的文件。',
   CATALOG_LIMIT: '发布记录已达到容量上限，请联系维护人员整理。',
   INVALID_NAVIGATION: '请检查目录分组与章节，章节不能重复或遗漏。', INVALID_IMAGE: '请选择有效的 PNG、JPEG 或 WebP 图片，尺寸不超过 16000 像素且总像素不超过 4000 万。',
-  IMAGE_LIMIT: '图片库已达到 4000 张上限。', UPLOAD_TOO_LARGE: '文件超过限制：图片 10 MiB，软件包 2 GiB。', UPLOAD_BUSY: '当前上传较多，请稍后重试。', EMPTY_UPLOAD: '不能上传空文件。',
+  IMAGE_LIMIT: '图片库已达到 4000 张上限。', UPLOAD_TOO_LARGE: '文件超过限制：图片 10 MiB，技能文件 5 MiB，软件包 2 GiB。', UPLOAD_BUSY: '当前上传较多，请稍后重试。', EMPTY_UPLOAD: '不能上传空文件。',
   INVALID_RELEASE: '请填写正确的版本、平台、标题和更新说明（1–30 条，每条最多 1000 字）。', INVALID_PACKAGE_NAME: '文件名必须包含当前版本和平台架构；Windows 需要 exe，macOS 需要 arm64.zip，可附带同版本安装包。',
   FILE_EXISTS: '已有同名文件，请先移除旧文件。', FILE_LIMIT: '一个平台最多上传 8 个文件。', DRAFT_LIMIT: '发布草稿已达到 100 个，请整理旧草稿。', DRAFT_NOT_FOUND: '发布草稿不存在，请刷新列表。',
   ALREADY_PUBLISHED: '该版本的平台安装包已发布，请使用新版本。', RELEASE_ID_LOCKED: '版本和平台由描述文件确定，不能手动修改，请新建发布草稿。', MAIN_PACKAGE_REQUIRED: '请上传一个主安装包：Windows 为 exe，macOS 为 arm64.zip。',
@@ -21,6 +21,12 @@ const messages: Record<string, string> = {
   CHAPTER_NOT_FOUND: '章节不存在或已移至回收站。', CHAPTER_TOO_LARGE: '单章内容不能超过 128 KiB，请拆分章节。', CHAPTER_LIMIT: '章节数量已达到 200 个，请联系维护人员整理。',
   INVALID_CHAPTER: '请检查标题、分组、排序与正文是否完整，章节标识只能使用小写字母、数字和连字符。', INVALID_CHAPTER_ID: '章节标识格式不正确。',
   CONTENT_UNAVAILABLE: '帮助文档暂时无法读取，请稍后重试。', INVALID_REQUEST: '提交的内容不完整，请检查后重试。',
+  BINARY_REQUIRED: '上传方式不正确，请重新选择文件后重试。',
+  INVALID_KNOWLEDGE: '请检查知识库表单：租户名称、租户 ID、三个检索工作流 ID、两个知识库 ID 与知识库描述为必填；标识须以 metrics- 开头且创建后不可修改；典型指标最多 50 个，每个 80 字以内。',
+  KNOWLEDGE_NOT_FOUND: '知识库条目不存在或已被删除，请刷新列表。', KNOWLEDGE_ID_TAKEN: '该知识库标识已被占用，请换一个或留空由服务端生成。',
+  TENANT_ID_TAKEN: '该租户 ID 已被其他知识库使用，请核对后修改。', KNOWLEDGE_LIMIT: '知识库条目已达到 500 个上限，请先整理旧条目。',
+  INVALID_SKILL_FILE: '技能文件无效：只接受 .zip 或 .md，最多 5 MiB。ZIP 中须恰好有一个 SKILL.md，位于压缩包根目录或唯一的一级目录内，该目录名需与 frontmatter 的 name 一致；SKILL.md 需含小写连字符格式的 name 和非空 description。',
+  SKILL_NOT_FOUND: '该知识库尚未配置技能文件，请刷新后重试。',
 }
 export class ApiError extends Error { constructor(public code: string) { super(messages[code] ?? '操作未完成，请稍后重试。') } }
 export async function guideApi<T>(url: string, options: { method?: string; data?: unknown; csrf?: string; signal?: AbortSignal; timeout?: number } = {}): Promise<T> {
