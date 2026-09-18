@@ -136,7 +136,7 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | PUT /api/admin/releases/published/:version | 修改版本说明及上下架状态 |
 | GET/POST /api/admin/knowledge | 知识库目录（含下架条目） / 新建条目 |
 | PUT/DELETE /api/admin/knowledge/:id | 修改、删除知识库条目 |
-| POST/DELETE /api/admin/knowledge/:id/skill?name=... | 上传、移除配套技能文件；上传使用 X-Revision |
+| POST/DELETE /api/admin/knowledge/skill?name=... | 上传、移除全部知识库共用的配套技能文件；上传使用 X-Revision |
 
 二进制上传使用 `application/octet-stream`，总超时 30 分钟，空闲超时 60 秒。最多两个并行上传；JSON 仍限制大小并使用 15 秒接收超时。生产网关需要匹配请求大小、超时，并转发原始 Host。备份时保留 `contentDirectory` 和 `releaseDirectory`。详见 [ADR 0013](docs/adr/0013-website-admin-assets-and-releases.md)。
 
@@ -157,7 +157,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 | GET /updates/archive/:version/macos-arm64/latest-mac.yml | electron-updater macOS 元数据 |
 | GET /updates/archive/:version/:platform/:filename | 目录中登记的文件，支持 HEAD、单段 Range、ETag |
 | GET /api/knowledge/metrics | 已上架的指标知识库元数据目录，带 ETag 与 If-None-Match |
-| GET /api/knowledge/metrics/:id/skill | 该知识库的配套技能文件字节，ETag 为内容 SHA-256 |
+| GET /api/knowledge/metrics/skill | 全部知识库共用的配套技能文件字节，ETag 为内容 SHA-256 |
 
 安装包支持管理员网页上传发布与原有 CLI 发布，复用同一个发布事务。拒绝目录遍历、非法文件名、符号链接和目录外文件；下载流在连接断开时关闭。安装包可放在官网自己的持久化磁盘，目前不接第三方对象存储/CDN。
 
@@ -176,7 +176,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 .runtime/website-content/knowledge/.trash/catalog-<时间戳>.json  # 覆盖或删除前的目录副本
 ```
 
-写入使用 `knowledge/.knowledge-lock` 互斥锁与同目录临时文件 + rename。`revision` 是 `catalog.json` 规范化内容的 SHA-256，不写进文件本身；所有写接口必须携带当前 `revision`，不一致返回 `409 REVISION_CONFLICT`。条目上限 500，`id` 创建后不可修改，`tenant_id` 在目录内唯一；`id` 省略时由服务端生成 `metrics-` + 10 位十六进制。删除条目时技能文件保留在 `skills/`，其他条目可能引用同一哈希。
+写入使用 `knowledge/.knowledge-lock` 互斥锁与同目录临时文件 + rename。`revision` 是 `catalog.json` 规范化内容的 SHA-256，不写进文件本身；所有写接口必须携带当前 `revision`，不一致返回 `409 REVISION_CONFLICT`。条目上限 500，`id` 创建后不可修改，`tenant_id` 在目录内唯一；`id` 省略时由服务端生成 `metrics-` + 10 位十六进制。配套技能是整个目录共用的一份（`catalog.skill`），删除条目不影响它；替换技能后旧文件仍按哈希保留在 `skills/`。
 
 ### 公开契约
 
@@ -187,6 +187,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
   "schemaVersion": 1,
   "revision": "271715833d763c8e71f66c1af43188701972f1b119cf3d99f23a8c136747b494",
   "updatedAt": "2026-09-18T14:40:24.473Z",
+  "skill": { "name": "metric-skill", "file_name": "metric-skill.zip", "sha256": "1f78d1…", "size": 336, "kind": "zip", "uploaded_at": "2026-09-18T14:40:24.473Z" },
   "items": [
     {
       "id": "metrics-retail",
@@ -202,7 +203,6 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
         "typical_indicators": ["GMV", "动销率"]
       },
       "enabled": true,
-      "skill": { "name": "metric-skill", "file_name": "metric-skill.zip", "sha256": "1f78d1…", "size": 336, "kind": "zip", "uploaded_at": "2026-09-18T14:40:24.473Z" },
       "created_at": "2026-09-18T14:40:24.371Z",
       "updated_at": "2026-09-18T14:40:24.473Z"
     }
@@ -212,7 +212,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 字段名沿用产品侧给定的 snake_case，`quer_card_data` 保持接口原拼写。长度上限：`tenant_name` 80、`tenant_id` 128、各 workflow / knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。可选字段留空时不出现在 JSON 中。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)，两端各自校验，暂不引入跨仓库契约包。
 
-`GET /api/knowledge/metrics/:id/skill` 返回技能文件字节，`Content-Type` 为 `application/zip` 或 `text/markdown; charset=utf-8`，`Content-Disposition: attachment` 使用原始文件名，并带 `ETag: "<sha256>"`、`X-Skill-Name`、`X-Skill-Sha256`。这里的 `id` 是可变地址（技能文件可被替换），因此使用 `Cache-Control: no-store` 并由 `If-None-Match` 复用字节，替换后客户端立即拿到新内容。未知 `id`、已下架条目返回 `404 KNOWLEDGE_NOT_FOUND`，未配置技能返回 `404 SKILL_NOT_FOUND`。
+`GET /api/knowledge/metrics/skill` 返回技能文件字节，`Content-Type` 为 `application/zip` 或 `text/markdown; charset=utf-8`，`Content-Disposition: attachment` 使用原始文件名，并带 `ETag: "<sha256>"`、`X-Skill-Name`、`X-Skill-Sha256`。地址固定而文件可被替换，因此使用 `Cache-Control: no-store` 并由 `If-None-Match` 复用字节，替换后客户端立即拿到新内容。未配置技能返回 `404 SKILL_NOT_FOUND`。
 
 ### 管理流程与技能文件规则
 
@@ -222,7 +222,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 - `.md` 文件本身即 `SKILL.md`。
 - `.zip` 只读取中央目录，仅支持 stored 与 deflate；拒绝 zip64、加密、多卷、数据描述符缺少长度、重复条目名、绝对路径、`..`、反斜杠、符号链接位，以及超过 256 个条目或解压后超过 20 MiB。解压前按中央目录声明的长度限流，解压后核对长度与 CRC-32。
 - 压缩包中必须恰好有一个 `SKILL.md`，位于根目录或唯一的一级目录内；位于目录中时目录名必须等于 frontmatter 的 `name`。
-- `SKILL.md` 的 frontmatter 为 `---` 包裹的 YAML（拒绝重复键与别名），必须含小写连字符格式的 `name`（≤ 64）与非空 `description`（≤ 500）。`name` 写入 `entry.skill.name`。
+- `SKILL.md` 的 frontmatter 为 `---` 包裹的 YAML（拒绝重复键与别名），必须含小写连字符格式的 `name`（≤ 64）与非空 `description`（≤ 500）。`name` 写入 `catalog.skill.name`。技能文件是整个目录共用的一份：端侧绑定第一个知识库时安装，绑定更多知识库不重复安装，解除最后一个绑定时移除。
 - 校验通过后按内容 SHA-256 落盘为 `skills/<sha256>.<zip|md>`；已存在同哈希文件时直接复用，不重写。
 
 错误码：`INVALID_KNOWLEDGE` 400、`KNOWLEDGE_NOT_FOUND` 404、`KNOWLEDGE_ID_TAKEN` 409、`TENANT_ID_TAKEN` 409、`KNOWLEDGE_LIMIT` 409、`INVALID_SKILL_FILE` 400、`SKILL_NOT_FOUND` 404、`REVISION_CONFLICT` 409。详见 [ADR 0018](docs/adr/0018-metric-knowledge-catalog.md)。

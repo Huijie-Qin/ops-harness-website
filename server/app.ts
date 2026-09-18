@@ -77,7 +77,6 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
       }
       if (options.knowledge && url.pathname.startsWith('/api/knowledge/metrics')) {
         const store = options.knowledge
-        const skill = /^\/api\/knowledge\/metrics\/([^/]+)\/skill$/.exec(url.pathname)
         try {
           if (url.pathname === '/api/knowledge/metrics') {
             const catalog = await store.publicList()
@@ -86,9 +85,9 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
             res.setHeader('ETag', etag)
             json(req, res, 200, catalog); return
           }
-          if (!skill) { json(req, res, 404, { error: 'NOT_FOUND' }); return }
-          const file = await store.openSkill(decodeURIComponent(skill[1]!))
-          // The id is mutable: a replaced skill file must be picked up at once, so revalidate on the content hash.
+          if (url.pathname !== '/api/knowledge/metrics/skill') { json(req, res, 404, { error: 'NOT_FOUND' }); return }
+          const file = await store.openSkill()
+          // The address is fixed while the file is replaceable, so revalidate on the content hash instead of caching.
           res.setHeader('Cache-Control', 'no-store')
           res.setHeader('X-Skill-Name', file.name)
           res.setHeader('X-Skill-Sha256', file.sha256)

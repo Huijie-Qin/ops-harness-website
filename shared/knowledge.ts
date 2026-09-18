@@ -17,13 +17,13 @@ export type MetricKnowledgeEntry = {
   knowledge_retrieve_workflow_id: MetricKnowledgeWorkflowIds
   knowledge_id: MetricKnowledgeIds
   knowledge_base_meta: MetricKnowledgeBaseMeta
-  skill?: MetricKnowledgeSkill | undefined
   enabled: boolean
   created_at: string
   updated_at: string
 }
-export type MetricKnowledgeCatalog = { schemaVersion: 1; revision: string; updatedAt: string; items: MetricKnowledgeEntry[] }
-export type MetricKnowledgeInput = Omit<MetricKnowledgeEntry, 'id' | 'skill' | 'created_at' | 'updated_at'> & { id?: string | undefined }
+/** The companion Skill is catalog-wide: every bound library installs the same file once. */
+export type MetricKnowledgeCatalog = { schemaVersion: 1; revision: string; updatedAt: string; skill?: MetricKnowledgeSkill | undefined; items: MetricKnowledgeEntry[] }
+export type MetricKnowledgeInput = Omit<MetricKnowledgeEntry, 'id' | 'created_at' | 'updated_at'> & { id?: string | undefined }
 
 export const metricKnowledgeIdPattern = /^metrics-[a-z0-9]+(?:-[a-z0-9]+)*$/
 export const skillNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import type { MetricKnowledgeCatalog, MetricKnowledgeEntry } from '../shared/knowledge'
+import type { MetricKnowledgeCatalog, MetricKnowledgeEntry, MetricKnowledgeSkill } from '../shared/knowledge'
 import { maxSkillFileBytes, maxTypicalIndicators, metricKnowledgeIdPattern } from '../shared/knowledge'
 import { ApiError, guideApi, requestMessage, uploadFile } from './guide-api'
 import WebsiteDialog from './WebsiteDialog.vue'
@@ -20,6 +20,8 @@ const empty = (): Form => ({
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ error: [e: unknown]; dirty: [v: boolean]; busy: [v: boolean] }>()
 const items = ref<MetricKnowledgeEntry[]>([]), revision = ref(''), current = ref<MetricKnowledgeEntry>(), creating = ref(false)
+// The companion Skill is one shared file for the whole catalog: every bound library installs the same Skill.
+const skill = ref<MetricKnowledgeSkill>()
 const form = ref<Form>(empty()), baseline = ref('')
 const busy = ref(false), loading = ref(true), notice = ref(''), error = ref(''), progress = ref(0), uploadName = ref('')
 const errorElement = ref<HTMLElement>(), fileInput = ref<HTMLInputElement>(), tenantInput = ref<HTMLInputElement>()
@@ -28,7 +30,6 @@ const lifetime = new AbortController()
 let upload: AbortController | undefined
 const active = computed(() => Boolean(current.value || creating.value))
 const dirty = computed(() => active.value && JSON.stringify(form.value) !== baseline.value)
-const skill = computed(() => current.value?.skill)
 watch(dirty, v => emit('dirty', v)); watch(busy, v => emit('busy', v))
 const call = <T,>(url: string, options: { method?: string; data?: unknown } = {}) =>
   guideApi<T>(url, { ...options, csrf: props.csrf, signal: lifetime.signal })
@@ -43,7 +44,7 @@ async function run(fn: () => Promise<void>) {
 }
 async function list() {
   const catalog = await call<MetricKnowledgeCatalog>('/api/admin/knowledge')
-  items.value = catalog.items; revision.value = catalog.revision
+  items.value = catalog.items; revision.value = catalog.revision; skill.value = catalog.skill
   loading.value = false
 }
 function adopt(entry: MetricKnowledgeEntry) {
@@ -64,7 +65,7 @@ function adopt(entry: MetricKnowledgeEntry) {
 }
 function guard(action: () => void) {
   if (busy.value) return
-  if (dirty.value) confirmation.value = { title: '放弃未保存的修改？', message: '已保存的知识库条目和技能文件会保留。', label: '放弃修改', action }
+  if (dirty.value) confirmation.value = { title: '放弃未保存的修改？', message: '已保存的知识库条目和公共技能文件会保留。', label: '放弃修改', action }
   else action()
 }
 function select(entry: MetricKnowledgeEntry) { guard(() => { adopt(entry); error.value = ''; notice.value = '' }) }
@@ -99,7 +100,7 @@ async function save() {
     const result = await call<{ revision: string; entry: MetricKnowledgeEntry }>(id ? `/api/admin/knowledge/${encodeURIComponent(id)}` : '/api/admin/knowledge',
       { method: id ? 'PUT' : 'POST', data: { entry: payload(), revision: revision.value } })
     adopt(result.entry); await list()
-    notice.value = id ? '已保存，公开目录立即生效。' : '知识库已创建，可以上传配套技能文件。'
+    notice.value = id ? '已保存，公开目录立即生效。' : '知识库已创建，办公助手刷新知识中心即可看到。'
   })
 }
 function saveClick() {
@@ -109,7 +110,7 @@ function saveClick() {
 function remove() {
   const entry = current.value
   if (!entry) return
-  confirmation.value = { title: '删除这个知识库条目？', message: `${entry.tenant_name} · ${entry.id}。公开目录立即不再返回该条目；已上传的技能文件按内容哈希保留。`, label: '删除条目', action: () => void run(async () => {
+  confirmation.value = { title: '删除这个知识库条目？', message: `${entry.tenant_name} · ${entry.id}。公开目录立即不再返回该条目；公共技能文件不受影响。`, label: '删除条目', action: () => void run(async () => {
     await call(`/api/admin/knowledge/${encodeURIComponent(entry.id)}`, { method: 'DELETE', data: { revision: revision.value } })
     current.value = undefined; creating.value = false; form.value = empty(); baseline.value = JSON.stringify(form.value)
     await list(); notice.value = '条目已删除。'
@@ -117,18 +118,18 @@ function remove() {
 }
 async function send(event: Event) {
   const input = event.target as HTMLInputElement, file = input.files?.[0]
-  const entry = current.value
-  if (!file || !entry) return
+  if (!file) return
   await run(async () => {
     upload = new AbortController()
     try {
       if (file.size > maxSkillFileBytes) throw new ApiError('UPLOAD_TOO_LARGE')
       if (!/\.(zip|md)$/i.test(file.name)) throw new ApiError('INVALID_SKILL_FILE')
       uploadName.value = file.name; progress.value = 0
-      const result = await uploadFile<{ revision: string; entry: MetricKnowledgeEntry }>(
-        `/api/admin/knowledge/${encodeURIComponent(entry.id)}/skill?name=${encodeURIComponent(file.name)}`, file,
+      const result = await uploadFile<{ revision: string; skill: MetricKnowledgeSkill }>(
+        `/api/admin/knowledge/skill?name=${encodeURIComponent(file.name)}`, file,
         { csrf: props.csrf, revision: revision.value, signal: upload.signal, progress: v => progress.value = v })
-      adopt(result.entry); await list(); notice.value = '技能文件已校验并保存。'
+      skill.value = result.skill; revision.value = result.revision; await list()
+      notice.value = '公共技能文件已校验并保存，绑定任一指标知识库的数据分析专家都会安装它。'
     } catch (e) {
       if (upload.signal.aborted) notice.value = '上传已取消，原有技能文件仍保留。'
       else throw e
@@ -136,11 +137,11 @@ async function send(event: Event) {
   })
 }
 function detach() {
-  const entry = current.value
-  if (!entry?.skill) return
-  confirmation.value = { title: '移除这个技能文件？', message: `${entry.skill.file_name}。条目将不再提供技能下载，已上传的文件按内容哈希保留。`, label: '移除技能文件', action: () => void run(async () => {
-    const result = await call<{ revision: string; entry: MetricKnowledgeEntry }>(`/api/admin/knowledge/${encodeURIComponent(entry.id)}/skill`, { method: 'DELETE', data: { revision: revision.value } })
-    adopt(result.entry); await list(); notice.value = '技能文件引用已移除。'
+  const value = skill.value
+  if (!value) return
+  confirmation.value = { title: '移除公共技能文件？', message: `${value.file_name}。端侧新的绑定将不再安装技能，已安装的副本保留到解除绑定；已上传的文件按内容哈希保留。`, label: '移除技能文件', action: () => void run(async () => {
+    const result = await call<{ revision: string }>('/api/admin/knowledge/skill', { method: 'DELETE', data: { revision: revision.value } })
+    revision.value = result.revision; skill.value = undefined; await list(); notice.value = '公共技能文件引用已移除。'
   }) }
 }
 function reload() {
@@ -161,17 +162,35 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
 <template>
   <section :aria-busy="busy">
     <div class="editor-heading">
-      <div><h2>知识库元数据</h2><p>维护指标知识库的租户、检索工作流与配套技能，办公助手刷新知识中心即可看到。</p></div>
+      <div><h2>知识库元数据</h2><p>维护指标知识库的租户与检索工作流，以及所有知识库共用的配套技能；办公助手刷新知识中心即可看到。</p></div>
       <div class="admin-actions"><button class="button secondary" :disabled="busy" @click="reload">刷新列表</button><button class="button primary" :disabled="busy" @click="create">新建知识库</button></div>
     </div>
     <p v-if="error" ref="errorElement" class="admin-error" role="alert" tabindex="-1">{{ error }}</p>
     <p v-if="notice" class="admin-success" role="status">{{ notice }}</p>
+    <section class="package-upload shared-skill" aria-labelledby="knowledge-skill-heading">
+      <div class="editor-heading">
+        <div><h3 id="knowledge-skill-heading">配套技能文件（全部知识库共用）</h3><p>一个 .zip 或 .md，最多 5 MiB。ZIP 中须恰好有一个 SKILL.md，位于根目录或唯一的一级目录内。端侧绑定任一指标知识库时安装一次，绑定更多知识库不会重复安装。</p></div>
+        <div class="admin-actions">
+          <input ref="fileInput" class="file-input" type="file" accept=".zip,.md" tabindex="-1" aria-label="选择技能文件" :disabled="busy || dirty" @change="send" />
+          <button class="button secondary" :disabled="busy || dirty" @click="fileInput?.click()">{{ skill ? '更换技能文件' : '选择技能文件' }}</button>
+          <button v-if="uploadName" class="button secondary" @click="upload?.abort()">取消上传</button>
+        </div>
+      </div>
+      <p v-if="dirty" class="editor-help">请先保存表单修改，再上传技能文件。</p>
+      <div v-if="uploadName" class="upload-progress" role="status"><span>{{ uploadName }}</span><progress :value="progress" max="100"></progress>{{ progress }}% · {{ progress === 100 ? '正在校验保存…' : '上传中' }}</div>
+      <article v-if="skill" class="package-file">
+        <div><strong>{{ skill.file_name }}</strong><small>技能名 {{ skill.name }} · {{ skill.kind === 'zip' ? '压缩包' : 'Markdown' }} · {{ size(skill.size) }} · {{ new Date(skill.uploaded_at).toLocaleString('zh-CN') }}</small><details><summary>内容哈希 SHA-256</summary><code>{{ skill.sha256 }}</code></details></div>
+        <button :disabled="busy || dirty" @click="detach">移除技能文件</button>
+      </article>
+      <p v-else class="editor-help">尚未配置公共技能文件。绑定指标知识库的数据分析专家不会收到附带技能。</p>
+      <p v-if="skill" class="editor-help"><a href="/api/knowledge/metrics/skill" download>下载当前技能文件</a>，可核对内容后再发布。</p>
+    </section>
     <div class="admin-layout">
       <aside class="admin-sidebar release-sidebar">
         <h3>知识库条目</h3>
         <p v-if="loading" class="editor-help">正在加载…</p>
         <p v-else-if="!items.length" class="editor-help">尚无条目</p>
-        <nav aria-label="知识库条目"><button v-for="item in items" :key="item.id" :disabled="busy" :aria-current="current?.id === item.id ? 'page' : undefined" @click="select(item)"><span>{{ item.tenant_name }}</span><small>{{ item.id }}<br />{{ item.enabled ? '已上架' : '已下架' }} · {{ item.skill ? '技能已配置' : '未配技能' }}</small></button></nav>
+        <nav aria-label="知识库条目"><button v-for="item in items" :key="item.id" :disabled="busy" :aria-current="current?.id === item.id ? 'page' : undefined" @click="select(item)"><span>{{ item.tenant_name }}</span><small>{{ item.id }}<br />{{ item.enabled ? '已上架' : '已下架' }}</small></button></nav>
       </aside>
       <section v-if="active" class="admin-workspace release-workspace">
         <div class="editor-heading"><h3>{{ creating ? '创建知识库条目' : '维护知识库条目' }}</h3><span class="editor-help">{{ dirty ? '有未保存的修改' : creating ? '尚未创建' : '已保存' }}</span></div>
@@ -201,24 +220,6 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
             <button class="button primary" :disabled="busy || !dirty">{{ busy ? '处理中…' : creating ? '创建条目' : '保存条目' }}</button>
           </fieldset>
         </form>
-        <section v-if="current" class="package-upload" aria-labelledby="knowledge-skill-heading">
-          <div class="editor-heading">
-            <div><h3 id="knowledge-skill-heading">配套技能文件</h3><p>一个 .zip 或 .md，最多 5 MiB。ZIP 中须恰好有一个 SKILL.md，位于根目录或唯一的一级目录内。</p></div>
-            <div class="admin-actions">
-              <input ref="fileInput" class="file-input" type="file" accept=".zip,.md" tabindex="-1" aria-label="选择技能文件" :disabled="busy || dirty" @change="send" />
-              <button class="button secondary" :disabled="busy || dirty" @click="fileInput?.click()">选择技能文件</button>
-              <button v-if="uploadName" class="button secondary" @click="upload?.abort()">取消上传</button>
-            </div>
-          </div>
-          <p v-if="dirty" class="editor-help">请先保存表单修改，再上传技能文件。</p>
-          <div v-if="uploadName" class="upload-progress" role="status"><span>{{ uploadName }}</span><progress :value="progress" max="100"></progress>{{ progress }}% · {{ progress === 100 ? '正在校验保存…' : '上传中' }}</div>
-          <article v-if="skill" class="package-file">
-            <div><strong>{{ skill.file_name }}</strong><small>技能名 {{ skill.name }} · {{ skill.kind === 'zip' ? '压缩包' : 'Markdown' }} · {{ size(skill.size) }} · {{ new Date(skill.uploaded_at).toLocaleString('zh-CN') }}</small><details><summary>内容哈希 SHA-256</summary><code>{{ skill.sha256 }}</code></details></div>
-            <button :disabled="busy || dirty" @click="detach">移除技能文件</button>
-          </article>
-          <p v-else class="editor-help">尚未配置技能文件。绑定该知识库的数据分析专家不会收到附带技能。</p>
-          <p v-if="skill && current.enabled" class="editor-help"><a :href="`/api/knowledge/metrics/${encodeURIComponent(current.id)}/skill`" download>下载当前技能文件</a>，可核对内容后再上架。</p>
-        </section>
         <div v-if="current" class="editor-bottom"><button :disabled="busy" @click="remove">删除条目</button></div>
       </section>
       <div v-else class="admin-empty">新建知识库条目，或选择左侧已有条目进行维护。</div>
@@ -226,3 +227,5 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
     <WebsiteDialog v-if="confirmation" :title="confirmation.title" :message="confirmation.message" :confirm-label="confirmation.label" @cancel="confirmation = undefined" @confirm="accept" />
   </section>
 </template>
+
+<style scoped>.shared-skill{border-top:0;padding-top:0;margin-top:0;margin-bottom:24px}</style>

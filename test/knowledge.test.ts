@@ -2,7 +2,7 @@ import { crc32, deflateRawSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
 import { test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createServer } from 'node:http'
@@ -141,49 +141,58 @@ test('the public catalog omits withdrawn entries, answers If-None-Match and neve
   assert.equal((await fetch(origin + '/api/knowledge/metrics/metrics-retail')).status, 404)
 })
 
-test('skill files are validated, stored by content hash and served to anonymous readers', async t => {
+test('the shared skill file is validated, stored by content hash, served to anonymous readers and shared by every entry', async t => {
   const { json, upload, read, origin, content } = await fixture(t)
   const base = await read()
   let current = await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: base.revision })).json()
-  const api = '/api/admin/knowledge/metrics-retail/skill'
-  assert.equal((await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')).status, 404)
-  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')).json()).error, 'SKILL_NOT_FOUND')
+  const api = '/api/admin/knowledge/skill'
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).status, 404)
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/skill')).json()).error, 'SKILL_NOT_FOUND')
   const packaged = archive([{ name: 'metric-skill/' }, { name: 'metric-skill/SKILL.md', data: skillMarkdown() }, { name: 'metric-skill/references/glossary.md', data: Buffer.from('# 词表\n') }])
   let response = await upload(`${api}?name=metric-skill.zip`, packaged, { 'X-Revision': current.revision })
   assert.equal(response.status, 200)
   current = await response.json()
-  assert.equal(current.entry.skill.name, 'metric-skill')
-  assert.equal(current.entry.skill.kind, 'zip')
-  assert.equal(current.entry.skill.file_name, 'metric-skill.zip')
-  assert.equal(current.entry.skill.size, packaged.length)
-  assert.equal(current.entry.skill.sha256, createHash('sha256').update(packaged).digest('hex'))
-  assert.deepEqual(await readdir(path.join(content, 'knowledge/skills')), [`${current.entry.skill.sha256}.zip`])
-  const download = await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')
+  assert.equal(current.skill.name, 'metric-skill')
+  assert.equal(current.skill.kind, 'zip')
+  assert.equal(current.skill.file_name, 'metric-skill.zip')
+  assert.equal(current.skill.size, packaged.length)
+  assert.equal(current.skill.sha256, createHash('sha256').update(packaged).digest('hex'))
+  assert.deepEqual(await readdir(path.join(content, 'knowledge/skills')), [`${current.skill.sha256}.zip`])
+  // The catalog carries the skill once; entries never carry their own.
+  const listed = await read()
+  assert.equal(listed.skill.sha256, current.skill.sha256)
+  assert.equal(listed.items[0].skill, undefined)
+  const pub = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  assert.equal(pub.skill.name, 'metric-skill'); assert.equal(pub.items[0].skill, undefined)
+  const download = await fetch(origin + '/api/knowledge/metrics/skill')
   assert.equal(download.status, 200)
   assert.equal(download.headers.get('content-type'), 'application/zip')
-  assert.equal(download.headers.get('etag'), `"${current.entry.skill.sha256}"`)
+  assert.equal(download.headers.get('etag'), `"${current.skill.sha256}"`)
   assert.equal(download.headers.get('x-skill-name'), 'metric-skill')
-  assert.equal(download.headers.get('x-skill-sha256'), current.entry.skill.sha256)
+  assert.equal(download.headers.get('x-skill-sha256'), current.skill.sha256)
   assert.equal(download.headers.get('cache-control'), 'no-store')
   assert.match(download.headers.get('content-disposition')!, /metric-skill\.zip$/)
   assert.deepEqual(Buffer.from(await download.arrayBuffer()), packaged)
-  assert.equal((await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill', { headers: { 'If-None-Match': `"${current.entry.skill.sha256}"` } })).status, 304)
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill', { headers: { 'If-None-Match': `"${current.skill.sha256}"` } })).status, 304)
+  // A second entry sees the same shared skill without uploading anything.
+  current = await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-media', tenant_id: 'tenant-media' }), revision: current.revision })).json()
+  assert.equal((await read()).skill.sha256, listed.skill.sha256)
   // A SKILL.md at the archive root is accepted, and identical bytes reuse the stored file.
-  const previous = current.entry.skill.sha256
+  const previous = listed.skill.sha256
   const flat = archive([{ name: 'SKILL.md', data: skillMarkdown('flat-skill') }])
   current = await (await upload(`${api}?name=flat.zip`, flat, { 'X-Revision': current.revision })).json()
-  assert.equal(current.entry.skill.name, 'flat-skill')
+  assert.equal(current.skill.name, 'flat-skill')
   // Replacing the file must be visible at once: the old validator no longer matches.
-  const replaced = await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill', { headers: { 'If-None-Match': `"${previous}"` } })
+  const replaced = await fetch(origin + '/api/knowledge/metrics/skill', { headers: { 'If-None-Match': `"${previous}"` } })
   assert.equal(replaced.status, 200)
-  assert.equal(replaced.headers.get('etag'), `"${current.entry.skill.sha256}"`)
+  assert.equal(replaced.headers.get('etag'), `"${current.skill.sha256}"`)
   assert.equal(replaced.headers.get('x-skill-name'), 'flat-skill')
   current = await (await upload(`${api}?name=again.zip`, flat, { 'X-Revision': current.revision })).json()
   assert.equal((await readdir(path.join(content, 'knowledge/skills'))).length, 2)
   const plain = skillMarkdown('plain-skill')
   current = await (await upload(`${api}?name=SKILL.md`, plain, { 'X-Revision': current.revision })).json()
-  assert.equal(current.entry.skill.kind, 'md'); assert.equal(current.entry.skill.name, 'plain-skill')
-  assert.equal((await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')).headers.get('content-type'), 'text/markdown; charset=utf-8')
+  assert.equal(current.skill.kind, 'md'); assert.equal(current.skill.name, 'plain-skill')
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).headers.get('content-type'), 'text/markdown; charset=utf-8')
   for (const [name, bytes] of [
     ['escape.zip', archive([{ name: '../SKILL.md', data: skillMarkdown() }])],
     ['backslash.zip', archive([{ name: 'metric-skill\\SKILL.md', data: skillMarkdown() }])],
@@ -203,50 +212,43 @@ test('skill files are validated, stored by content hash and served to anonymous 
   }
   assert.equal((await upload(`${api}?name=big.md`, Buffer.alloc(maxSkillFileBytes + 1), { 'X-Revision': current.revision })).status, 413)
   assert.equal((await upload(`${api}?name=stale.md`, plain, { 'X-Revision': 'stale' })).status, 409)
-  assert.equal((await upload(`/api/admin/knowledge/metrics-missing/skill?name=a.md`, plain, { 'X-Revision': current.revision })).status, 404)
   assert.ok(!(await readdir(path.join(content, 'knowledge/skills'))).some(name => name.endsWith('.upload')))
-  current = await (await json('/api/admin/knowledge/metrics-retail/skill', { revision: current.revision }, 'DELETE')).json()
-  assert.equal(current.entry.skill, undefined)
-  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')).json()).error, 'SKILL_NOT_FOUND')
-  assert.equal((await json('/api/admin/knowledge/metrics-retail/skill', { revision: current.revision }, 'DELETE')).status, 404)
-  assert.equal((await json('/api/admin/knowledge/metrics-retail', { revision: current.revision }, 'DELETE')).status, 200)
-  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')).json()).error, 'KNOWLEDGE_NOT_FOUND')
+  // The shared skill stays available while any enabled entry exists, and outlives entry deletion.
+  current = await (await json('/api/admin/knowledge/metrics-media', { revision: current.revision }, 'DELETE')).json()
+  assert.equal((await fetch(origin + '/api/knowledge/metrics/skill')).status, 200)
+  current = await (await json(api, { revision: current.revision }, 'DELETE')).json()
+  assert.equal(current.skill, undefined)
+  assert.equal((await read()).skill, undefined)
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/skill')).json()).error, 'SKILL_NOT_FOUND')
+  assert.equal((await json(api, { revision: current.revision }, 'DELETE')).status, 404)
 })
 
-test('a skill upload with the wrong content type and a withdrawn entry are refused by the public reader', async t => {
-  const { json, upload, read, origin, headers } = await fixture(t)
+test('a skill upload with the wrong content type is refused and a legacy per-entry skill is dropped on load', async t => {
+  const { json, upload, read, origin, headers, content } = await fixture(t)
   const base = await read()
   const created = await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-retail' }), revision: base.revision })).json()
-  const wrongType = await fetch(origin + '/api/admin/knowledge/metrics-retail/skill?name=a.md', {
+  const wrongType = await fetch(origin + '/api/admin/knowledge/skill?name=a.md', {
     method: 'POST', headers: { ...headers, 'Content-Type': 'text/plain', 'X-Revision': created.revision }, body: 'x',
   })
   assert.equal(wrongType.status, 415); assert.equal((await wrongType.json()).error, 'BINARY_REQUIRED')
-  const attached = await (await upload('/api/admin/knowledge/metrics-retail/skill?name=SKILL.md', skillMarkdown(), { 'X-Revision': created.revision })).json()
-  const hidden = await (await json('/api/admin/knowledge/metrics-retail', { entry: entry({ enabled: false }), revision: attached.revision }, 'PUT')).json()
-  assert.equal(hidden.entry.skill.name, 'metric-skill')
-  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/metrics-retail/skill')).json()).error, 'KNOWLEDGE_NOT_FOUND')
-  assert.deepEqual((await (await fetch(origin + '/api/knowledge/metrics')).json()).items, [])
+  // Old catalogs stored the skill inside each entry; they are read but the per-entry field is ignored.
+  const raw = JSON.parse(await readFile(path.join(content, 'knowledge/catalog.json'), 'utf8'))
+  raw.items[0].skill = { name: 'legacy-skill', file_name: 'legacy.md', sha256: 'a'.repeat(64), size: 10, kind: 'md', uploaded_at: '2026-09-18T00:00:00.000Z' }
+  await writeFile(path.join(content, 'knowledge/catalog.json'), JSON.stringify(raw))
+  const reloaded = await new KnowledgeStore(content).list()
+  assert.equal(reloaded.skill, undefined); assert.equal(reloaded.items[0].skill, undefined)
+  const pub = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  assert.equal(pub.items[0].skill, undefined)
+  assert.equal((await (await fetch(origin + '/api/knowledge/metrics/skill')).json()).error, 'SKILL_NOT_FOUND')
 })
 
 test('knowledge administration rejects anonymous, cross-origin and missing CSRF requests', async t => {
   const { origin, headers } = await fixture(t)
-  for (const route of ['/api/admin/knowledge', '/api/admin/knowledge/metrics-retail', '/api/admin/knowledge/metrics-retail/skill']) {
+  for (const route of ['/api/admin/knowledge', '/api/admin/knowledge/metrics-retail', '/api/admin/knowledge/skill']) {
     assert.equal((await fetch(origin + route)).status, 401)
     assert.equal((await fetch(origin + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401)
     for (const override of [{ 'X-CSRF-Token': '' }, { Origin: 'https://evil.example' }]) {
       assert.equal((await fetch(origin + route, { method: 'POST', headers: { ...headers, ...override, 'Content-Type': 'application/json' }, body: '{}' })).status, 403)
     }
   }
-})
-
-test('a skill name may be used by only one knowledge entry in the catalog', async t => {
-  const { json, upload, read } = await fixture(t)
-  const first = (await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-first' }), revision: (await read()).revision })).json())
-  const second = (await (await json('/api/admin/knowledge', { entry: entry({ id: 'metrics-second', tenant_id: 'tenant-second' }), revision: first.revision })).json())
-  const zip = archive([{ name: 'shared-guide/SKILL.md', data: skillMarkdown('shared-guide') }])
-  const attached = await upload('/api/admin/knowledge/metrics-first/skill?name=shared-guide.zip', zip, { 'X-Revision': second.revision })
-  assert.equal(attached.status, 200)
-  const duplicate = await upload('/api/admin/knowledge/metrics-second/skill?name=shared-guide.zip', zip, { 'X-Revision': (await attached.json()).revision })
-  assert.equal(duplicate.status, 409)
-  assert.equal((await duplicate.json()).error, 'SKILL_NAME_TAKEN')
 })

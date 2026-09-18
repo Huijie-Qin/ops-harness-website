@@ -36,7 +36,7 @@ const InputSchema = z.object({
 const EntrySchema = InputSchema.extend({
   id: IdSchema, skill: SkillSchema.optional(), created_at: z.string().datetime(), updated_at: z.string().datetime(),
 }).strict()
-const DocumentSchema = z.object({ schemaVersion: z.literal(1), updatedAt: z.string().datetime(), items: z.array(EntrySchema).max(maxKnowledgeEntries) }).strict()
+const DocumentSchema = z.object({ schemaVersion: z.literal(1), updatedAt: z.string().datetime(), skill: SkillSchema.optional(), items: z.array(EntrySchema).max(maxKnowledgeEntries) }).strict()
 type CatalogDocument = z.infer<typeof DocumentSchema>
 type KnowledgeInput = z.infer<typeof InputSchema>
 
@@ -170,7 +170,9 @@ export class KnowledgeStore {
       if (error instanceof GuideError) throw error
       return fail('CONTENT_UNAVAILABLE', 503)
     }
-    const document = parse(DocumentSchema, raw, 'CONTENT_UNAVAILABLE', 503)
+    const parsed = parse(DocumentSchema, raw, 'CONTENT_UNAVAILABLE', 503)
+    // Catalogs written before the skill became catalog-wide carried one per entry; that field is ignored.
+    const document: CatalogDocument = { ...parsed, items: parsed.items.map(stripLegacySkill) }
     if (new Set(document.items.map(item => item.id)).size !== document.items.length) return fail('CONTENT_UNAVAILABLE', 503)
     if (new Set(document.items.map(item => item.tenant_id)).size !== document.items.length) return fail('CONTENT_UNAVAILABLE', 503)
     return { ...document, revision: revisionOfDocument(document) }
@@ -182,8 +184,8 @@ export class KnowledgeStore {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-')
     await copyFile(path.join(this.root, 'catalog.json'), path.join(trash, `catalog-${stamp}.json`))
   }
-  private async commit(items: MetricKnowledgeEntry[], destructive: boolean) {
-    const document = parse(DocumentSchema, { schemaVersion: 1, updatedAt: new Date().toISOString(), items })
+  private async commit(items: MetricKnowledgeEntry[], skill: MetricKnowledgeSkill | undefined, destructive: boolean) {
+    const document = parse(DocumentSchema, { schemaVersion: 1, updatedAt: new Date().toISOString(), ...(skill ? { skill } : {}), items })
     if (destructive) await this.backup()
     await atomicJson(this.root, 'catalog.json', document)
     return { ...document, revision: revisionOfDocument(document) }
@@ -201,13 +203,13 @@ export class KnowledgeStore {
     return entry
   }
   private async replace(current: CatalogDocument & { revision: string }, entry: MetricKnowledgeEntry, destructive: boolean) {
-    const document = await this.commit(current.items.map(item => item.id === entry.id ? entry : item), destructive)
+    const document = await this.commit(current.items.map(item => item.id === entry.id ? entry : item), current.skill, destructive)
     return { revision: document.revision, updatedAt: document.updatedAt, entry: this.found(document, entry.id) }
   }
 
   async list(): Promise<MetricKnowledgeCatalog> {
     const { revision, ...document } = await this.load()
-    return { schemaVersion: 1, revision, updatedAt: document.updatedAt, items: document.items }
+    return { schemaVersion: 1, revision, updatedAt: document.updatedAt, ...(document.skill ? { skill: document.skill } : {}), items: document.items }
   }
   async publicList(): Promise<MetricKnowledgeCatalog> {
     const catalog = await this.list()
@@ -223,7 +225,7 @@ export class KnowledgeStore {
       if (current.items.some(item => item.id === id)) return fail('KNOWLEDGE_ID_TAKEN', 409)
       if (current.items.some(item => item.tenant_id === value.tenant_id)) return fail('TENANT_ID_TAKEN', 409)
       const now = new Date().toISOString()
-      const document = await this.commit([...current.items, { id, ...rest, created_at: now, updated_at: now }], false)
+      const document = await this.commit([...current.items, { id, ...rest, created_at: now, updated_at: now }], current.skill, false)
       return { revision: document.revision, updatedAt: document.updatedAt, entry: this.found(document, id) }
     })
   }
@@ -236,24 +238,22 @@ export class KnowledgeStore {
       const previous = this.found(current, id)
       if (current.items.some(item => item.id !== id && item.tenant_id === value.tenant_id)) return fail('TENANT_ID_TAKEN', 409)
       const { id: ignored, ...rest } = value
-      return this.replace(current, { id, ...rest, ...(previous.skill ? { skill: previous.skill } : {}), created_at: previous.created_at, updated_at: new Date().toISOString() }, true)
+      return this.replace(current, { id, ...rest, created_at: previous.created_at, updated_at: new Date().toISOString() }, true)
     })
   }
   async remove(id: string, expected: unknown) {
     parse(IdSchema, id)
     return this.change(expected, async current => {
       this.found(current, id)
-      // Skill files stay on disk; other entries may reference the same content hash.
-      const document = await this.commit(current.items.filter(item => item.id !== id), true)
+      // The shared skill file is catalog-wide and stays; other entries keep using it.
+      const document = await this.commit(current.items.filter(item => item.id !== id), current.skill, true)
       return { revision: document.revision, updatedAt: document.updatedAt }
     })
   }
-  async attachSkill(id: string, name: string, req: IncomingMessage, expected: unknown) {
-    parse(IdSchema, id)
-    if (!name || name.length > maxSkillFileName || /[/\\\x00-\x1f]/.test(name)) return fail('INVALID_SKILL_FILE')
+  /** Attach the catalog-wide companion Skill; every bound library installs this one file. */
+  async attachSkill(name: string, req: IncomingMessage, expected: unknown) {
+    if (unsafeFileName(name)) return fail('INVALID_SKILL_FILE')
     const kind = /\.zip$/i.test(name) ? 'zip' as const : /\.md$/i.test(name) ? 'md' as const : fail('INVALID_SKILL_FILE')
-    // Reject unknown entries before accepting any bytes.
-    this.found(await this.load(), id)
     await safeDirectory(this.root); await safeDirectory(this.skills)
     const file = await receiveFile(req, this.skills, maxSkillFileBytes)
     try {
@@ -262,37 +262,40 @@ export class KnowledgeStore {
       const sha256 = createHash('sha256').update(bytes).digest('hex')
       const stored = `${sha256}.${kind}`
       return await this.change(expected, async current => {
-        const previous = this.found(current, id)
-        // Every bound skill lands in the same expert directory skills/<name>/, so names are unique per catalog.
-        if (current.items.some(item => item.id !== id && item.skill?.name === skill.name)) return fail('SKILL_NAME_TAKEN', 409)
         // Content-addressed and immutable: an identical file is reused, never rewritten.
         try {
           const info = await lstat(path.join(this.skills, stored))
           if (!info.isFile() || info.isSymbolicLink() || info.size !== file.size) return fail('CONTENT_UNAVAILABLE', 503)
         } catch (error) { if (!missing(error)) throw error; await rename(file.temp, path.join(this.skills, stored)) }
         const value: MetricKnowledgeSkill = { name: skill.name, file_name: name, sha256, size: file.size, kind, uploaded_at: new Date().toISOString() }
-        return this.replace(current, { ...previous, skill: value, updated_at: new Date().toISOString() }, Boolean(previous.skill))
+        const document = await this.commit(current.items, value, Boolean(current.skill))
+        return { revision: document.revision, updatedAt: document.updatedAt, skill: document.skill }
       })
     } finally { await unlink(file.temp).catch(error => { if (!missing(error)) throw error }) }
   }
-  async detachSkill(id: string, expected: unknown) {
-    parse(IdSchema, id)
+  async detachSkill(expected: unknown) {
     return this.change(expected, async current => {
-      const previous = this.found(current, id)
-      if (!previous.skill) return fail('SKILL_NOT_FOUND', 404)
-      const { skill, ...rest } = previous
-      return this.replace(current, { ...rest, updated_at: new Date().toISOString() }, true)
+      if (!current.skill) return fail('SKILL_NOT_FOUND', 404)
+      const document = await this.commit(current.items, undefined, true)
+      return { revision: document.revision, updatedAt: document.updatedAt }
     })
   }
-  async openSkill(id: string) {
+  async openSkill() {
     const document = await this.load()
-    const entry = document.items.find(item => item.id === id && item.enabled)
-    if (!entry) return fail('KNOWLEDGE_NOT_FOUND', 404)
-    if (!entry.skill) return fail('SKILL_NOT_FOUND', 404)
-    const { name, sha256, size, kind, file_name: fileName } = entry.skill
+    if (!document.skill) return fail('SKILL_NOT_FOUND', 404)
+    const { name, sha256, size, kind, file_name: fileName } = document.skill
     return {
       root: this.root, segments: ['skills', `${sha256}.${kind}`], size, sha256, name, fileName,
       type: kind === 'zip' ? 'application/zip' : 'text/markdown; charset=utf-8',
     }
   }
+}
+
+function stripLegacySkill(entry: MetricKnowledgeEntry & { skill?: unknown }): MetricKnowledgeEntry {
+  const { skill: _legacy, ...rest } = entry
+  return rest
+}
+
+function unsafeFileName(name: string): boolean {
+  return !name || name.length > maxSkillFileName || [...name].some(char => char === '/' || char === '\\' || char.charCodeAt(0) < 32)
 }

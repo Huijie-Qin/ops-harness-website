@@ -17,7 +17,7 @@
 
 **ZIP 只做字节级结构校验，不解压到磁盘、不执行内容。** 用 `node:zlib` 的 `inflateRawSync` 写了一个最小中央目录读取器，只接受 stored 与 deflate，拒绝 zip64、加密、多卷、缺长度的数据描述符、重复条目名、绝对路径、`..`、反斜杠、符号链接位，以及超过 256 个条目或解压后超过 20 MiB；解压前按声明长度限流，解压后核对长度与 CRC-32。只有 `SKILL.md` 一个条目会被真正解压，其余文件视为技能附属资源、原样保存在压缩包内。压缩包必须恰好含一个 `SKILL.md`，位于根或唯一的一级目录内，位于目录中时目录名必须等于 frontmatter 的 `name`；frontmatter 用已锁定的 `yaml` 包按 `uniqueKeys` 且禁用别名解析，要求小写连字符格式的 `name` 与非空 `description`。不引入压缩库，不新增依赖。
 
-**公开接口匿名只读，两个地址的缓存语义不同。** `GET /api/knowledge/metrics` 只返回上架条目，`Cache-Control: no-store` 配 `ETag: "<revision>"`，端侧带 `If-None-Match` 刷新时命中返回 304，避免每次刷新都传整份目录。`GET /api/knowledge/metrics/:id/skill` 的地址由可变的 `id` 构成——同一个 `id` 的技能文件可以被替换——所以这里同样用 `no-store` + `ETag: "<sha256>"`，靠内容哈希复用字节，替换后客户端立即拿到新内容，而不是用 `immutable` 把旧文件钉在缓存里。响应另带 `X-Skill-Name` 与 `X-Skill-Sha256`，端侧下载后可直接比对。
+**公开接口匿名只读，两个地址的缓存语义不同。** `GET /api/knowledge/metrics` 只返回上架条目，`Cache-Control: no-store` 配 `ETag: "<revision>"`，端侧带 `If-None-Match` 刷新时命中返回 304，避免每次刷新都传整份目录。`GET /api/knowledge/metrics/skill` 的地址由可变的 `id` 构成——同一个 `id` 的技能文件可以被替换——所以这里同样用 `no-store` + `ETag: "<sha256>"`，靠内容哈希复用字节，替换后客户端立即拿到新内容，而不是用 `immutable` 把旧文件钉在缓存里。响应另带 `X-Skill-Name` 与 `X-Skill-Sha256`，端侧下载后可直接比对。
 
 **字段名保持产品侧给定的 snake_case，包括 `quer_card_data` 的原拼写。** 这就是两端共享的 JSON 契约，类型与上限写在 `shared/knowledge.ts`，两端各自校验。本期不引入跨仓库 vendor 契约包，等端侧实现稳定后再评估。
 
@@ -34,3 +34,11 @@
 ## 验证
 
 `test/knowledge.test.ts` 覆盖目录 CRUD、revision 冲突、字段与标识校验、租户唯一、公开目录只含上架条目并响应 304、技能 ZIP（一级目录内、根目录、`../` 穿越、缺失 / 重复 `SKILL.md`、目录名与 `name` 不符、多个一级目录、超深路径）与 `.md` 校验、超限 413 与非二进制 415、公开下载的字节与响应头、替换技能后旧 `ETag` 失效、删除后 404，以及新增管理路由的匿名 / 跨域 / 缺 CSRF 拒绝与重启后读取一致。UI 修改需在真实浏览器验收新建、上传、上下架与页面切换。
+
+## 2026-09-19 修订：技能文件改为目录级公共配置
+
+运营侧反馈配套技能不是每个知识库各一份，而是所有指标知识库共用的一份。因此 `catalog.json` 顶层新增 `skill`，条目不再携带
+`skill`（旧文件里的条目级 `skill` 读取时忽略，下一次写入即消失）；管理接口改为 `POST/DELETE /api/admin/knowledge/skill`，
+公开下载改为 `GET /api/knowledge/metrics/skill`，缓存语义不变（`no-store` + `ETag: "<sha256>"`）。管理页面把技能上传放到
+条目列表之上，“技能名全目录唯一”的规则随之取消。端侧绑定第一个知识库时安装该技能，绑定更多知识库不重复安装，
+解除最后一个绑定时移除。

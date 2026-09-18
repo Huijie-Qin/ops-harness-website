@@ -25,7 +25,6 @@ const messages: Record<string, string> = {
   INVALID_KNOWLEDGE: '请检查知识库表单：租户名称、租户 ID、三个检索工作流 ID、两个知识库 ID 与知识库描述为必填；标识须以 metrics- 开头且创建后不可修改；典型指标最多 50 个，每个 80 字以内。',
   KNOWLEDGE_NOT_FOUND: '知识库条目不存在或已被删除，请刷新列表。', KNOWLEDGE_ID_TAKEN: '该知识库标识已被占用，请换一个或留空由服务端生成。',
   TENANT_ID_TAKEN: '该租户 ID 已被其他知识库使用，请核对后修改。', KNOWLEDGE_LIMIT: '知识库条目已达到 500 个上限，请先整理旧条目。',
-  SKILL_NAME_TAKEN: '该技能名称已被其他知识库使用，请修改 SKILL.md 的 name 后重新上传。',
   INVALID_SKILL_FILE: '技能文件无效：只接受 .zip 或 .md，最多 5 MiB。ZIP 中须恰好有一个 SKILL.md，位于压缩包根目录或唯一的一级目录内，该目录名需与 frontmatter 的 name 一致；SKILL.md 需含小写连字符格式的 name 和非空 description。',
   SKILL_NOT_FOUND: '该知识库尚未配置技能文件，请刷新后重试。',
 }
