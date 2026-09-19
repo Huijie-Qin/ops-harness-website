@@ -1,6 +1,7 @@
 // Shared JSON contract for the metric knowledge catalog. Field names use the snake_case spelling
-// agreed with the product repository; `quer_card_data` keeps the upstream interface spelling.
-export type MetricKnowledgeWorkflowIds = { get_card_index: string; get_card_meta: string; quer_card_data: string }
+// agreed with the product repository. `query_card_data` is the tool's real name (corrected 2026-09-19; the store reads the
+// earlier `quer_card_data` key as an alias so existing catalogs keep loading).
+export type MetricKnowledgeWorkflowIds = { get_card_index: string; get_card_meta: string; query_card_data: string }
 export type MetricKnowledgeIds = { card_index_knowledge_base: string; card_meta_knowledge_base: string }
 export type MetricKnowledgeBaseMeta = {
   knowledge_description: string
