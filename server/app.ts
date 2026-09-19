@@ -6,9 +6,11 @@ import { archiveUrl } from './website-url.js'
 import type { WebsiteConfig } from './config.js'
 import { decideUpdate, readCatalog, visibleReleases } from './catalog.js'
 import { serveFile } from './files.js'
+import { GuideError } from './guide-store.js'
+import type { KnowledgeStore } from './knowledge-store.js'
 
 type DevMiddleware = (req: IncomingMessage, res: ServerResponse, next: () => void) => void
-export function createHandler(config: WebsiteConfig, options: { clientRoot: string; adminIconHash?: string; dev?: DevMiddleware; guide?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>; now?: () => number; onError?: (error: unknown) => void }) {
+export function createHandler(config: WebsiteConfig, options: { clientRoot: string; adminIconHash?: string; dev?: DevMiddleware; guide?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>; knowledge?: KnowledgeStore; now?: () => number; onError?: (error: unknown) => void }) {
   if (options.adminIconHash && !/^[A-Za-z0-9+/]{43}=$/.test(options.adminIconHash)) throw new Error('Invalid administrator icon hash')
   const json = (req: IncomingMessage, res: ServerResponse, code: number, data: unknown) => {
     const body = JSON.stringify(data)
@@ -72,6 +74,29 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
         await serveFile(req, res, config.releaseDirectory, ['archive', version!, platformKey, artifact.name], {
           type: 'application/octet-stream', expectedSize: artifact.size, etag: `"${artifact.sha512}"`, attachment: artifact.name,
         }); return
+      }
+      if (options.knowledge && url.pathname.startsWith('/api/knowledge/metrics')) {
+        const store = options.knowledge
+        try {
+          if (url.pathname === '/api/knowledge/metrics') {
+            const catalog = await store.publicList()
+            const etag = `"${catalog.revision}"`
+            if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-store' }); res.end(); return }
+            res.setHeader('ETag', etag)
+            json(req, res, 200, catalog); return
+          }
+          if (url.pathname !== '/api/knowledge/metrics/skill') { json(req, res, 404, { error: 'NOT_FOUND' }); return }
+          const file = await store.openSkill()
+          // The address is fixed while the file is replaceable, so revalidate on the content hash instead of caching.
+          res.setHeader('Cache-Control', 'no-store')
+          res.setHeader('X-Skill-Name', file.name)
+          res.setHeader('X-Skill-Sha256', file.sha256)
+          await serveFile(req, res, file.root, file.segments, { type: file.type, expectedSize: file.size, etag: `"${file.sha256}"`, attachment: file.fileName })
+        } catch (error) {
+          if (!(error instanceof GuideError)) throw error
+          json(req, res, error.status, { error: error.code })
+        }
+        return
       }
       if (url.pathname.startsWith('/api/')) { json(req, res, 404, { error: 'NOT_FOUND' }); return }
       if (options.dev) {
