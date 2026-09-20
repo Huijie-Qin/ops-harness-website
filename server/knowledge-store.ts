@@ -15,7 +15,7 @@ import { atomicJson, missing, readJson, receiveFile, safeDirectory, withLock } f
 
 const text = (max: number) => z.string().trim().min(1).max(max)
 const optionalText = (max: number) => z.string().trim().max(max).optional()
-const WorkflowSchema = z.object({ get_card_index: text(256), get_card_meta: text(256), quer_card_data: text(256) }).strict()
+const WorkflowSchema = z.object({ get_card_index: text(256), get_card_meta: text(256), query_card_data: text(256) }).strict()
 const KnowledgeIdSchema = z.object({ card_index_knowledge_base: text(256), card_meta_knowledge_base: text(256) }).strict()
 const MetaSchema = z.object({
   knowledge_description: text(2000),
@@ -41,8 +41,28 @@ type CatalogDocument = z.infer<typeof DocumentSchema>
 type KnowledgeInput = z.infer<typeof InputSchema>
 
 const fail = (code: string, status = 400): never => { throw new GuideError(code, status) }
+/**
+ * The data workflow's real key is `query_card_data`. Catalogs and admin payloads written before 2026-09-19 spelled it
+ * `quer_card_data`; that key is read as the new one (and dropped when both are present) so stored catalogs keep loading.
+ */
+function normaliseLegacyWorkflowKey(input: unknown): unknown {
+  const fix = (entry: unknown): unknown => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return entry
+    const record = entry as Record<string, unknown>
+    const workflows = record.knowledge_retrieve_workflow_id
+    if (typeof workflows !== 'object' || workflows === null || Array.isArray(workflows)) return entry
+    if (!('quer_card_data' in workflows)) return entry
+    const { quer_card_data: legacy, ...rest } = workflows as Record<string, unknown>
+    return { ...record, knowledge_retrieve_workflow_id: 'query_card_data' in rest ? rest : { ...rest, query_card_data: legacy } }
+  }
+  if (typeof input === 'object' && input !== null && !Array.isArray(input) && Array.isArray((input as { items?: unknown }).items)) {
+    return { ...(input as Record<string, unknown>), items: (input as { items: unknown[] }).items.map(fix) }
+  }
+  return fix(input)
+}
+
 function parse<T>(schema: z.ZodType<T>, input: unknown, code = 'INVALID_KNOWLEDGE', status = 400): T {
-  const result = schema.safeParse(input)
+  const result = schema.safeParse(normaliseLegacyWorkflowKey(input))
   if (!result.success) return fail(code, status)
   return result.data
 }

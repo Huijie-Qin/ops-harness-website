@@ -19,7 +19,7 @@
 
 **公开接口匿名只读，两个地址的缓存语义不同。** `GET /api/knowledge/metrics` 只返回上架条目，`Cache-Control: no-store` 配 `ETag: "<revision>"`，端侧带 `If-None-Match` 刷新时命中返回 304，避免每次刷新都传整份目录。`GET /api/knowledge/metrics/skill` 的地址由可变的 `id` 构成——同一个 `id` 的技能文件可以被替换——所以这里同样用 `no-store` + `ETag: "<sha256>"`，靠内容哈希复用字节，替换后客户端立即拿到新内容，而不是用 `immutable` 把旧文件钉在缓存里。响应另带 `X-Skill-Name` 与 `X-Skill-Sha256`，端侧下载后可直接比对。
 
-**字段名保持产品侧给定的 snake_case，包括 `quer_card_data` 的原拼写。** 这就是两端共享的 JSON 契约，类型与上限写在 `shared/knowledge.ts`，两端各自校验。本期不引入跨仓库 vendor 契约包，等端侧实现稳定后再评估。
+**字段名保持产品侧给定的 snake_case。** 数据工作流键名为 `query_card_data`（2026-09-19 更正，早期误写为 `quer_card_data`，服务端读取时兼容旧键）。 这就是两端共享的 JSON 契约，类型与上限写在 `shared/knowledge.ts`，两端各自校验。本期不引入跨仓库 vendor 契约包，等端侧实现稳定后再评估。
 
 **管理界面沿用现有后台。** `/admin` 增加“知识库”页签，结构与发布包管理一致：左侧条目列表（租户名、`id`、上架状态、是否已配技能），右侧表单与技能文件区，删除与移除用应用内确认框，未保存修改有离开确认。走既有的密码会话、Host/Origin、CSRF 与 revision 校验，不新增账号体系或 API Token。
 

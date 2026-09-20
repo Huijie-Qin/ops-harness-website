@@ -193,7 +193,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
       "id": "metrics-retail",
       "tenant_name": "示例零售",
       "tenant_id": "tenant-retail",
-      "knowledge_retrieve_workflow_id": { "get_card_index": "wf-card-index", "get_card_meta": "wf-card-meta", "quer_card_data": "wf-card-data" },
+      "knowledge_retrieve_workflow_id": { "get_card_index": "wf-card-index", "get_card_meta": "wf-card-meta", "query_card_data": "wf-card-data" },
       "knowledge_id": { "card_index_knowledge_base": "kb-card-index", "card_meta_knowledge_base": "kb-card-meta" },
       "knowledge_base_meta": {
         "knowledge_description": "零售业务的核心指标口径与报表说明。",
@@ -210,7 +210,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 }
 ```
 
-字段名沿用产品侧给定的 snake_case，`quer_card_data` 保持接口原拼写。长度上限：`tenant_name` 80、`tenant_id` 128、各 workflow / knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。可选字段留空时不出现在 JSON 中。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)，两端各自校验，暂不引入跨仓库契约包。
+字段名沿用产品侧给定的 snake_case；数据工作流键名为 `query_card_data`（2026-09-19 更正，此前误写为 `quer_card_data`：旧目录与旧请求里的该键读取时按新键处理，保存时只写新键）。长度上限：`tenant_name` 80、`tenant_id` 128、各 workflow / knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。可选字段留空时不出现在 JSON 中。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)，两端各自校验，暂不引入跨仓库契约包。
 
 `GET /api/knowledge/metrics/skill` 返回技能文件字节，`Content-Type` 为 `application/zip` 或 `text/markdown; charset=utf-8`，`Content-Disposition: attachment` 使用原始文件名，并带 `ETag: "<sha256>"`、`X-Skill-Name`、`X-Skill-Sha256`。地址固定而文件可被替换，因此使用 `Cache-Control: no-store` 并由 `If-None-Match` 复用字节，替换后客户端立即拿到新内容。未配置技能返回 `404 SKILL_NOT_FOUND`。
 

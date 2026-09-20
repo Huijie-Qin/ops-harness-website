@@ -45,7 +45,7 @@ const skillMarkdown = (name = 'metric-skill', description = '指标知识库配�
 function entry(extra: Record<string, unknown> = {}) {
   return {
     tenant_name: '示例零售', tenant_id: 'tenant-retail',
-    knowledge_retrieve_workflow_id: { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', quer_card_data: 'wf-card-data' },
+    knowledge_retrieve_workflow_id: { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', query_card_data: 'wf-card-data' },
     knowledge_id: { card_index_knowledge_base: 'kb-card-index', card_meta_knowledge_base: 'kb-card-meta' },
     knowledge_base_meta: {
       knowledge_description: '零售业务的核心指标口径与报表说明。', indicators_cover: '1,200 项', reports_cover: '32 张', update_frequency: '每日 07:00',
@@ -87,7 +87,7 @@ test('knowledge entries are created, edited and removed under revision control a
   assert.equal(response.status, 200)
   let created = await response.json()
   assert.match(created.entry.id, /^metrics-[a-f0-9]{10}$/)
-  assert.equal(created.entry.knowledge_retrieve_workflow_id.quer_card_data, 'wf-card-data')
+  assert.equal(created.entry.knowledge_retrieve_workflow_id.query_card_data, 'wf-card-data')
   assert.equal(created.entry.created_at, created.entry.updated_at)
   const id = created.entry.id
   assert.equal((await json('/api/admin/knowledge', { entry: entry({ id, tenant_id: 'tenant-other' }), revision: created.revision })).status, 409)
@@ -235,10 +235,26 @@ test('a skill upload with the wrong content type is refused and a legacy per-ent
   const raw = JSON.parse(await readFile(path.join(content, 'knowledge/catalog.json'), 'utf8'))
   raw.items[0].skill = { name: 'legacy-skill', file_name: 'legacy.md', sha256: 'a'.repeat(64), size: 10, kind: 'md', uploaded_at: '2026-09-18T00:00:00.000Z' }
   await writeFile(path.join(content, 'knowledge/catalog.json'), JSON.stringify(raw))
+  // Catalogs written before 2026-09-19 spelled the data workflow key quer_card_data; it is read as query_card_data.
+  raw.items[0].knowledge_retrieve_workflow_id = { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', quer_card_data: 'wf-legacy' }
+  await writeFile(path.join(content, 'knowledge/catalog.json'), JSON.stringify(raw))
   const reloaded = await new KnowledgeStore(content).list()
   assert.equal(reloaded.skill, undefined); assert.equal(reloaded.items[0].skill, undefined)
+  assert.deepEqual(reloaded.items[0].knowledge_retrieve_workflow_id, { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', query_card_data: 'wf-legacy' })
   const pub = await (await fetch(origin + '/api/knowledge/metrics')).json()
   assert.equal(pub.items[0].skill, undefined)
+  assert.equal(pub.items[0].knowledge_retrieve_workflow_id.query_card_data, 'wf-legacy')
+  assert.equal('quer_card_data' in pub.items[0].knowledge_retrieve_workflow_id, false)
+  // An admin request still using the old key is normalised too, and only the new key is stored.
+  const current = await (await fetch(origin + '/api/admin/knowledge', { headers })).json()
+  const legacyPost = await fetch(origin + '/api/admin/knowledge', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entry: entry({ tenant_id: 'tenant-legacy', knowledge_retrieve_workflow_id: { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', quer_card_data: 'wf-legacy-2' } }), revision: current.revision }) })
+  const legacyBody = await legacyPost.json()
+  assert.equal(legacyPost.status, 200, JSON.stringify(legacyBody))
+  assert.deepEqual(legacyBody.entry.knowledge_retrieve_workflow_id, { get_card_index: 'wf-card-index', get_card_meta: 'wf-card-meta', query_card_data: 'wf-legacy-2' })
+  const stored = JSON.parse(await readFile(path.join(content, 'knowledge/catalog.json'), 'utf8'))
+  assert.equal(stored.items.length, 2)
+  assert.ok(stored.items.every((item) => !('quer_card_data' in item.knowledge_retrieve_workflow_id)))
   assert.equal((await (await fetch(origin + '/api/knowledge/metrics/skill')).json()).error, 'SKILL_NOT_FOUND')
 })
 

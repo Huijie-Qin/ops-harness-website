@@ -7,13 +7,13 @@ import WebsiteDialog from './WebsiteDialog.vue'
 
 type Form = {
   id: string; tenant_name: string; tenant_id: string
-  get_card_index: string; get_card_meta: string; quer_card_data: string
+  get_card_index: string; get_card_meta: string; query_card_data: string
   card_index_knowledge_base: string; card_meta_knowledge_base: string
   knowledge_description: string; indicators_cover: string; reports_cover: string; update_frequency: string
   typical_indicators: string; enabled: boolean
 }
 const empty = (): Form => ({
-  id: '', tenant_name: '', tenant_id: '', get_card_index: '', get_card_meta: '', quer_card_data: '',
+  id: '', tenant_name: '', tenant_id: '', get_card_index: '', get_card_meta: '', query_card_data: '',
   card_index_knowledge_base: '', card_meta_knowledge_base: '', knowledge_description: '',
   indicators_cover: '', reports_cover: '', update_frequency: '', typical_indicators: '', enabled: true,
 })
@@ -54,7 +54,7 @@ function adopt(entry: MetricKnowledgeEntry) {
     id: entry.id, tenant_name: entry.tenant_name, tenant_id: entry.tenant_id,
     get_card_index: entry.knowledge_retrieve_workflow_id.get_card_index,
     get_card_meta: entry.knowledge_retrieve_workflow_id.get_card_meta,
-    quer_card_data: entry.knowledge_retrieve_workflow_id.quer_card_data,
+    query_card_data: entry.knowledge_retrieve_workflow_id.query_card_data,
     card_index_knowledge_base: entry.knowledge_id.card_index_knowledge_base,
     card_meta_knowledge_base: entry.knowledge_id.card_meta_knowledge_base,
     knowledge_description: meta.knowledge_description, indicators_cover: meta.indicators_cover ?? '',
@@ -87,7 +87,7 @@ function payload() {
   return {
     ...(creating.value && value.id.trim() ? { id: value.id.trim() } : {}),
     tenant_name: value.tenant_name.trim(), tenant_id: value.tenant_id.trim(),
-    knowledge_retrieve_workflow_id: { get_card_index: value.get_card_index.trim(), get_card_meta: value.get_card_meta.trim(), quer_card_data: value.quer_card_data.trim() },
+    knowledge_retrieve_workflow_id: { get_card_index: value.get_card_index.trim(), get_card_meta: value.get_card_meta.trim(), query_card_data: value.query_card_data.trim() },
     knowledge_id: { card_index_knowledge_base: value.card_index_knowledge_base.trim(), card_meta_knowledge_base: value.card_meta_knowledge_base.trim() },
     knowledge_base_meta: meta, enabled: value.enabled,
   }
@@ -207,7 +207,7 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
               <label>租户 ID<input v-model="form.tenant_id" required maxlength="128" placeholder="DataAgent 中的租户标识" /><small>同一目录内唯一。</small></label>
               <label>检索工作流 get_card_index<input v-model="form.get_card_index" required maxlength="256" /></label>
               <label>检索工作流 get_card_meta<input v-model="form.get_card_meta" required maxlength="256" /></label>
-              <label>检索工作流 quer_card_data<input v-model="form.quer_card_data" required maxlength="256" /></label>
+              <label>检索工作流 query_card_data<input v-model="form.query_card_data" required maxlength="256" /></label>
               <label>知识库 card_index_knowledge_base<input v-model="form.card_index_knowledge_base" required maxlength="256" /></label>
               <label>知识库 card_meta_knowledge_base<input v-model="form.card_meta_knowledge_base" required maxlength="256" /></label>
               <label>指标覆盖<input v-model="form.indicators_cover" maxlength="80" placeholder="例如：1,200 项，可留空" /></label>
