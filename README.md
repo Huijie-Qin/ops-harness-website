@@ -69,6 +69,7 @@ pnpm start
 | port | 4173 | 监听端口 |
 | releaseDirectory | ../.runtime/website-releases | 安装包和发布目录数据 |
 | contentDirectory | ../.runtime/website-content | 在线文档、历史、目录配置和图片 |
+| trackingEnabled | false；仓库配置显式 true | 是否接收运营打点，与启动方式及事件环境无关 |
 | adminPasswordEnv | DSH_OPS_WEBSITE_ADMIN_PASSWORD | 注入管理员密码的环境变量名称，配置中不保存密码 |
 
 从旧配置迁移时，将原 `config/releases.json` 和 `config/website-content.json` 的字段合并到一份 `website.json`，仅保留一个 `schemaVersion`。如果新文件位置改变，应同步调整两个存储目录的相对路径，确保仍指向原数据；无需移动在线内容或发布归档。将官网进程原来的 `DSH_OPS_RELEASE_CONFIG` / `DSH_OPS_WEBSITE_CONTENT_CONFIG` 替换为 `DSH_OPS_WEBSITE_CONFIG` 后重启。只设置旧变量时服务和 CLI 会提示迁移并停止，不会静默改用默认目录。密码环境变量保持原名称。配置修改需要重启服务才能生效。
@@ -242,8 +243,8 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 
 ## 运营统计
 
-管理员 `/admin` 新增“运营统计”，支持登录人数、DAU/近30天MAU、用户明细与排名、功能使用和操作明细。独立 SQLite 与采集 API 不改变普通 logger。本地 `pnpm dev` 开放免认证采集，产品开发 overlay 默认上传至 `http://127.0.0.1:4173`，无需 Token 环境变量。公司身份未接通时保持匿名；生产上传/验证后续实现，正常生产启动不开放采集。详见 [运营统计部署](docs/runbooks/operational-tracking.md) 和 [ADR 0019](docs/adr/0019-operational-tracking.md)。
+管理员 `/admin` 新增“运营统计”，支持登录人数、DAU/近30天MAU、用户明细与排名、功能使用和操作明细。独立 SQLite 与采集 API 不改变普通 logger。本地 `pnpm dev` 开放免认证采集，产品开发 overlay 默认上传至 `http://127.0.0.1:4173`，无需 Token 环境变量。未取得 WeLink 工号时保持匿名。部署时显式配置 `trackingEnabled: true`，正常 `pnpm start` 即可接收远程 Host 的 production/development/test 批次；采集认证后续实现，管理员登录保持原规则。详见 [运营统计部署](docs/runbooks/operational-tracking.md) 和 [ADR 0019](docs/adr/0019-operational-tracking.md)。
 
-运营统计环境：管理员页面通过 `/api/admin/analytics/context` 获取默认环境。仅 `--dev` 且 `trackingDevelopment: true` 时默认为开发，其余默认为生产；手动选择保留为当前浏览器 UI 偏好。数据均按所选环境查询，空表先核对环境、日期与版本筛选。匿名对话、Token、Skill 可查看次数；登录用户数、DAU/MAU 和排名直接按终端当前 WeLink 工号归属。
+运营统计环境：管理员页面通过 `/api/admin/analytics/context` 获取默认环境。`pnpm dev`（--dev）默认开发，`pnpm start` 默认生产；采集开关只由 trackingEnabled 控制；手动选择保留为当前浏览器 UI 偏好。数据均按所选环境查询，空表先核对环境、日期与版本筛选。匿名对话、Token、Skill 可查看次数；登录用户数、DAU/MAU 和排名直接按终端当前 WeLink 工号归属。
 
 运营统计支持“全部环境”，跨环境、跨平台的同一工号统一去重；页面不再提供平台筛选。没有工号的旧事件保留匿名，不补归当前登录者。

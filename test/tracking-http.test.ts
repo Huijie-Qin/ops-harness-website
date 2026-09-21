@@ -11,13 +11,15 @@ import { createTrackingHandlers } from '../server/tracking/http.js'
 import { createGuideHandler } from '../server/guide-http.js'
 import { GuideStore } from '../server/guide-store.js'
 
-async function fixture(t: TestContext, development: boolean) {
+async function fixture(t: TestContext, enabled: boolean, defaultEnvironment: 'development' | 'production' = 'development', remoteAddress?: string) {
   const root = await mkdtemp(path.join(tmpdir(), 'tracking-http-'))
   const store = new TrackingStore(path.join(root, 'analytics'))
-  const tracking = createTrackingHandlers(store, { development })
+  const tracking = createTrackingHandlers(store, { enabled, defaultEnvironment })
   let origin = ''
   let guide: Awaited<ReturnType<typeof createGuideHandler>>
   const server = createServer(async (req, res) => {
+    // Exercise receiver policy deterministically without a routable test NIC.
+    if (remoteAddress) Object.defineProperty(req.socket, 'remoteAddress', { value: remoteAddress, configurable: true })
     const url = new URL(req.url!, origin)
     if (await tracking.collect(req, res, url) || await guide(req, res, url)) return
     res.writeHead(404); res.end()
@@ -32,6 +34,35 @@ async function fixture(t: TestContext, development: boolean) {
   const batch = { schemaVersion: 1, installationId, environment: 'development', events: [event] }
   return { origin, post, batch, event }
 }
+
+test('explicit deployment collection accepts remote production events without dev mode or credentials', async t => {
+  const { origin, post, batch, event } = await fixture(t, true, 'production', '192.0.2.20')
+  const production = { ...event, environment: 'production', employee: { source: 'welink', employeeId: 'qa-production' } }
+  const upload = { ...batch, environment: 'production', events: [production] }
+  const endpoint = '/api/tracking/v1/events:batch'
+  assert.deepEqual((await (await post(endpoint, upload)).json() as any).acceptedIds, [event.eventId])
+  assert.deepEqual((await (await post(endpoint, upload)).json() as any).duplicateIds, [event.eventId])
+  assert.equal((await post(endpoint, upload, { Origin: origin })).status, 403)
+  assert.equal((await fetch(origin + '/api/admin/analytics/overview')).status, 401)
+  const login = await post('/api/admin/login', { password: 'test-admin-password-only' }, { Origin: origin })
+  const headers = { Cookie: login.headers.get('set-cookie')!.split(';')[0]! }
+  assert.deepEqual(await (await fetch(origin + '/api/admin/analytics/context', { headers })).json(), { defaultEnvironment: 'production' })
+  const overview = await (await fetch(origin + '/api/admin/analytics/overview', { headers })).json() as any
+  assert.equal(overview.dau, 1); assert.equal(overview.loginUsers, 1)
+  const users = await (await fetch(origin + '/api/admin/analytics/users', { headers })).json() as any
+  assert.equal(users.total, 1); assert.equal(users.rows[0].account, 'qa-production')
+})
+
+test('collection is controlled only by enabled regardless of the default analytics environment', async t => {
+  for (const environment of ['development', 'production'] as const) {
+    const disabled = await fixture(t, false, environment)
+    const denied = await disabled.post('/api/tracking/v1/events:batch', disabled.batch)
+    assert.equal(denied.status, 503)
+    assert.deepEqual(await denied.json(), { error: 'TRACKING_NOT_ENABLED' })
+    const enabled = await fixture(t, true, environment, '192.0.2.20')
+    assert.equal((await enabled.post('/api/tracking/v1/events:batch', enabled.batch)).status, 200)
+  }
+})
 
 test('local development collects without credentials, deduplicates and preserves admin authentication', async t => {
   const { origin, post, batch, event } = await fixture(t, true)
@@ -84,14 +115,15 @@ test('development HTTP attributes the current Host employee across environments 
   assert.equal(overview.dau, 1); assert.equal(overview.loginUsers, 1)
 })
 
-test('development collection validates installation/environment and rejects browser and production requests', async t => {
+test('collection validates installation/environment and rejects browser requests', async t => {
   const { origin, post, batch, event } = await fixture(t, true)
   const endpoint = '/api/tracking/v1/events:batch'
   assert.equal((await post(endpoint, batch, { Origin: origin })).status, 403)
   assert.equal((await post(endpoint, batch, { 'Sec-Fetch-Site': 'same-origin' })).status, 403)
   assert.equal((await post(endpoint, { ...batch, installationId: undefined })).status, 400)
   assert.equal((await post(endpoint, { ...batch, events: [event, event] })).status, 400)
-  assert.equal((await post(endpoint, { ...batch, environment: 'production', events: [{ ...event, environment: 'production' }] })).status, 403)
+  const production = { ...event, eventId: randomUUID(), operationId: randomUUID(), interactionId: randomUUID(), environment: 'production' }
+  assert.deepEqual((await (await post(endpoint, { ...batch, environment: 'production', events: [production] })).json() as any).acceptedIds, [production.eventId])
   for (const different of [{ installationId: randomUUID() }, { environment: 'test' }]) {
     const response = await post(endpoint, { ...batch, events: [{ ...event, ...different }] })
     assert.equal(response.status, 200)
@@ -102,8 +134,8 @@ test('development collection validates installation/environment and rejects brow
   assert.equal(identity.status, 503); assert.deepEqual(await identity.json(), { error: 'IDENTITY_NOT_CONFIGURED' })
 })
 
-test('collection stays disabled and analytics defaults to production outside explicit development', async t => {
-  const { origin, post, batch } = await fixture(t, false)
+test('disabled collection still allows authenticated analytics queries with their configured default', async t => {
+  const { origin, post, batch } = await fixture(t, false, 'production')
   const response = await post('/api/tracking/v1/events:batch', batch)
   assert.equal(response.status, 503)
   assert.deepEqual(await response.json(), { error: 'TRACKING_NOT_ENABLED' })

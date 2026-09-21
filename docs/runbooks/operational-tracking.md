@@ -1,27 +1,27 @@
 # 运营统计部署
 
-使用 Node 24 和 pnpm 11.19.0。运行 `pnpm install --frozen-lockfile`、`pnpm check`、`pnpm build`。原有官网与管理员配置继续有效，新增字段有兼容默认值。
+使用 Node 24 和 pnpm 11.19.0。运行 `pnpm install --frozen-lockfile`、`pnpm check`、`pnpm build`。管理员配置保持原规则。升级配置时删除 trackingDevelopment，只保留 trackingEnabled；旧字段不再接受，需从实际加载的完整配置中移除。
 
 | 配置字段 | 默认值 / 用途 |
 | --- | --- |
 | analyticsDirectory | ../.runtime/website-analytics，相对 config 文件目录 |
-| trackingDevelopment | false；仅在 --dev 时允许本机免认证采集，本地 config/website.json 已设为 true |
+| trackingEnabled | 缺省 false；true 接收本机/远程 Host，false 关闭；仓库配置为 true |
 
 本地联调直接运行 `pnpm dev`，地址为 `http://127.0.0.1:4173`。产品仓库 `pnpm local:start` 的开发 overlay 已指向此地址，并使用 development 环境。两端无需配置上传 Token、安装凭据数组或 SSO 变量。安装 ID 自动生成，作为批次字段上传，不需要人工登记。
 
-接收批次为 `{schemaVersion:1, installationId, environment, events}`；environment 仅 development/test，tenant 固定为 development，逐条核对事件安装 ID 与环境。无需 Authorization。只接受 loopback 连接的 Host POST，拒绝浏览器 Origin/Fetch-Metadata；每分钟最多 120 次本地采集请求，限制大小、并发、有效时间与重复 ID。
+接收批次为 `{schemaVersion:1, installationId, environment, events}`；environment 可为 production/development/test，逐条核对事件安装 ID 与环境。沿用历史 tenant=development 作为单租户命名空间，不改变已有工号/去重记录，与事件环境无关。无需 Authorization，拒绝浏览器 Origin/Fetch-Metadata；每分钟最多 120 次采集请求，限制大小、并发、有效时间与重复 ID。
 
-当前用户直接按终端左下角的 WeLink 登录工号归属，无需额外 SSO；没有工号的事件仍匿名，安装数不能替代用户人数。旧 identity-sessions 不开放。生产客户端只记录本地文件，不执行上传；官网 `pnpm start` 不启用采集，返回 503 TRACKING_NOT_ENABLED。生产验证/分发方式后续单独设计。
+当前用户直接按终端左下角的 WeLink 登录工号归属，无需额外 SSO；没有工号的事件仍匿名，安装数不能替代用户人数。旧 identity-sessions 不开放。部署官网的完整配置中设置 `"trackingEnabled": true`，构建后正常 `pnpm start` 即可接收远程工作助手；工作助手保持 environment=production，并把 collectionOrigin 设为实际官网 HTTP/HTTPS origin（无页面/API 路径）。修改配置后重启官网和工作助手。采集认证后续实现，管理员鉴权不变。缺少 trackingEnabled 或配置为 false 时，任何启动方式均关闭采集（503 TRACKING_NOT_ENABLED）；true 时接收所有环境的本机/远程 Host 上报。
 
-事件 API 只允许 Host 上传，开发上报无需密码；管理查询必须先通过现有 `/api/admin/login`。管理员进入 `/admin` → “运营统计”。仅 `--dev` 且 `trackingDevelopment: true` 时默认开发，其余默认生产；手动选择保留为浏览器 UI 偏好，开发/测试仍可通过筛选明确切换。页面通过认证保护的 `/api/admin/analytics/context` 获取默认值，不根据浏览器域名猜测。DAU 覆盖的是已接入的主动业务事件；页面访问与系统调度单独计数。当前已覆盖官方 Web 人工消息，未知入口/后台及子代理不增加人工次数。
+事件 API 只允许 Host 上传，开发上报无需密码；管理查询必须先通过现有 `/api/admin/login`。管理员进入 `/admin` → “运营统计”。`pnpm dev`（--dev）默认开发，`pnpm start` 默认生产，与采集开关无关；手动选择保留为浏览器 UI 偏好，开发/测试仍可通过筛选明确切换。页面通过认证保护的 `/api/admin/analytics/context` 获取默认值，不根据浏览器域名猜测。DAU 覆盖的是已接入的主动业务事件；页面访问与系统调度单独计数。当前已覆盖官方 Web 人工消息，未知入口/后台及子代理不增加人工次数。
 
 页面为空先核对环境、日期和版本筛选。采集状态有匿名事件时，可在操作明细、对话与 Token、Skill 使用查看次数；人数为零时检查新事件是否携带工号；没有工号的历史事件不追归当前账号。开发服务重启会使内存管理员会话失效，需要重新登录。
 
-存储为单机本地盘 SQLite，不能多个官网实例共用网络盘。数据处理在 Worker 中，最多 64 个待执行请求；采集 HTTP 最多 32 并发，开发接收每分钟 120 请求，每批100事件/256KiB。数据库故障返回 503，终端保留队列重试。
+存储为单机本地盘 SQLite，不能多个官网实例共用网络盘。数据处理在 Worker 中，最多 64 个待执行请求；采集 HTTP 最多 32 并发，接收每分钟 120 请求，每批100事件/256KiB。数据库故障返回 503，终端保留队列重试。
 
 明细90天、去重120天、轻量事实与日汇总400天；补传最多30天，未来偏差最多5分钟。每小时维护。停服后备份整个 analyticsDirectory（包含可能存在的 WAL/SHM），或使用 SQLite 官方在线备份；运行时不能只复制主数据库。恢复整套数据库后重启，终端可能重传，由幂等表去重。
 
-当前不提供按员工绩效评分、在线时长、自动数据导出或员工账号管理。生产上传/认证、真实 Windows 客户端后续在对应环境验收。验收测试使用独立临时目录和 test 环境，不向生产上传。
+当前不提供按员工绩效评分、在线时长、自动数据导出或员工账号管理。生产采集认证、真实 Windows 客户端后续在对应环境验收。验收使用独立临时目录，覆盖 production/development/test 分类；不向实际部署站点上传测试数据。
 
 ## 对话与 Skill 统计
 
@@ -34,3 +34,15 @@
 schema v1→v2 在启动时自动事务迁移，不清空旧数据。runtime_facts 与事件幂等接收同事务写入，保留400天；原始事件90天过期后仍能查询用量和Skill统计。旧版空属性人工消息保留次数，因缺少会话标识不补造会话数。SDK 仅观察实时追加，旧会话不回填；崩溃前未结束步骤、辅助模型请求及隐藏重试不保证覆盖。
 
 环境支持“全部环境 / 生产 / 开发 / 测试”，全部环境会在事实层统一去重；平台筛选已移除，默认合并所有平台。登录用户数统计所选期间有登录工号且有前台活动的用户，主动使用人数/DAU/MAU只统计人工业务使用。采集状态按所选日期、环境、版本统计事件和安装数。
+
+## 部署后无数据
+
+先检查官网启动日志中的 `[tracking] collection=enabled scope=host`，再检查工作助手 backend 日志中的 `ops-tracking upload-started`，应显示实际官网地址。首次上报失败会记录 HTTP 状态、错误码、积压和重试时间，恢复后显示 upload-recovered。
+
+- TRACKING_NOT_ENABLED：实际加载的配置没有开启 trackingEnabled，或官网未重启。
+- LOCAL_UPLOAD_REQUIRED / PRODUCTION_TRACKING_NOT_IMPLEMENTED：官网仍使用旧实现，需要更新构建并重启。
+- HTTP_404 / INVALID_ACK：代理未把 `/api/tracking/v1/events:batch` 交给官网 Node 服务，或运行了错误站点。
+- ECONNREFUSED / ENOTFOUND / UPLOAD_TIMEOUT：地址、监听网卡、DNS、代理或连接异常。
+- EVENTS_REJECTED：查看安全拒收原因；EVENT_TIME_OUT_OF_RANGE 是超过30天/时钟偏差，INVALID_EVENT 需核对协议版本。
+
+旧客户端的 production-upload-pending 不会发出请求，需更新客户端代码/安装包。本次接收修复也要更新并重启官网；仅改 environment 无法修复旧版本。原文件和 checkpoint 保留，升级后自动补传有效窗口内的事件。官网选择“生产”或“全部环境”；有次数但没有用户时再检查工号归属。此次事件契约未变，官网 tracking vendor 不需要替换。

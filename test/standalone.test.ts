@@ -26,7 +26,7 @@ test('standalone defaults and external configuration keep state relative to thei
   assert.equal(defaults.releaseDirectory, path.join(project, '.runtime/website-releases'))
   assert.equal(defaults.contentDirectory, path.join(project, '.runtime/website-content'))
   assert.equal(defaults.adminPasswordEnv, 'DSH_OPS_WEBSITE_ADMIN_PASSWORD')
-  assert.equal(defaults.trackingDevelopment, true)
+  assert.equal(defaults.trackingEnabled, true)
   const root = await mkdtemp(path.join(tmpdir(), 'standalone website '))
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, 'config'))
@@ -43,7 +43,7 @@ test('standalone defaults and external configuration keep state relative to thei
   assert.equal(config.contentDirectory, path.join(root, 'data/docs'))
   assert.equal(config.websiteUrl, externalConfig.websiteUrl)
   assert.equal(config.port, externalConfig.port)
-  assert.equal(config.trackingDevelopment, false)
+  assert.equal(config.trackingEnabled, false)
   const explicit = path.join(root, 'explicit.json'), releases = path.join(root, 'absolute releases'), content = path.join(root, 'absolute docs')
   await writeFile(explicit, JSON.stringify({ ...externalConfig, releaseDirectory: releases, contentDirectory: content }))
   const selected = await loadConfig(explicit)
@@ -71,7 +71,7 @@ test('unified configuration preserves strict release and content validation', as
     { websiteUrl: 'https://user:pass@example.com' }, { websiteUrl: 'https://example.com?query=1' },
     { websiteUrl: 'https://example.com#fragment' }, { websiteUrl: 'http://' + 'a'.repeat(2048) },
     { port: 0 }, { releaseDirectory: '' }, { contentDirectory: undefined }, { contentDirectory: '  ' },
-    { adminPasswordEnv: undefined }, { adminPasswordEnv: 'invalid-name' }, { password: 'must-not-be-stored' },
+    { adminPasswordEnv: undefined }, { adminPasswordEnv: 'invalid-name' }, { password: 'must-not-be-stored' }, { trackingEnabled: 'true' }, { trackingDevelopment: true },
   ]) {
     await writeFile(configPath, JSON.stringify({ ...externalConfig, ...invalid }))
     await assert.rejects(loadConfig(configPath))

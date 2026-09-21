@@ -5,7 +5,7 @@ import { GuideError } from '../guide-store.js'
 import type { AdminHandler } from '../admin-files.js'
 import { dayAt, type Installation } from './database.js'
 import type { TrackingStore } from './store.js'
-export type TrackingHttpConfig = { development: boolean }
+export type TrackingHttpConfig = { enabled: boolean; defaultEnvironment: 'development' | 'production' }
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v => Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0,10) === v)
 const Query = z.object({ from: date, to: date, environment: z.enum(['all', 'production', 'development', 'test']).default('production'), platform: z.enum(['darwin','win32','linux','other']).optional(), appVersion: z.string().regex(/^[0-9][a-zA-Z0-9.+-]{0,63}$/).optional(), userId: z.uuid().optional(), offset: z.coerce.number().int().min(0).max(100000).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).strict().refine(q => q.from <= q.to && Date.parse(q.to) - Date.parse(q.from) <= 399 * 86400000)
 function json(res: ServerResponse, value: unknown, status = 200) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)) }
@@ -26,8 +26,7 @@ export function createTrackingHandlers(store: TrackingStore, config: TrackingHtt
     if (!url.pathname.startsWith('/api/tracking/')) return false
     try {
       if (req.method !== 'POST') throw new GuideError('METHOD_NOT_ALLOWED', 405)
-      if (!config.development) throw new GuideError('TRACKING_NOT_ENABLED', 503)
-      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')) throw new GuideError('LOCAL_UPLOAD_REQUIRED', 403)
+      if (!config.enabled) throw new GuideError('TRACKING_NOT_ENABLED', 503)
       if (req.headers.origin || req.headers['sec-fetch-site']) throw new GuideError('HOST_UPLOAD_REQUIRED', 403)
       if (url.pathname === '/api/tracking/v1/identity-sessions') throw new GuideError('IDENTITY_NOT_CONFIGURED', 503)
       if (url.pathname !== '/api/tracking/v1/events:batch') throw new GuideError('NOT_FOUND', 404)
@@ -38,9 +37,10 @@ export function createTrackingHandlers(store: TrackingStore, config: TrackingHtt
         const parsed = BatchSchema.safeParse(await body(req, MAX_BATCH_BYTES))
         if (!parsed.success) throw new GuideError('INVALID_BATCH', 400)
         const { installationId, environment, events } = parsed.data
-        if (environment === 'production') throw new GuideError('PRODUCTION_TRACKING_NOT_IMPLEMENTED', 403)
         const ids = events.map(e => (e as { eventId?: unknown } | null)?.eventId)
         if (ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length) throw new GuideError('INVALID_BATCH_IDS', 400)
+        // Keep the historical single-tenant namespace for identity/dedup
+        // continuity. Its name is independent of the event environment.
         // Host employee metadata attributes analytics only; it grants no access.
         const installation: Installation = { tenantId: 'development', installationId, environment }
         json(res, await store.ingest(installation, events))
@@ -56,17 +56,17 @@ export function createTrackingHandlers(store: TrackingStore, config: TrackingHtt
     if (!url.pathname.startsWith('/api/admin/analytics/')) return false
     context.method(req, ['GET'])
     if (url.pathname === '/api/admin/analytics/context') {
-      context.json(res, { defaultEnvironment: config.development ? 'development' : 'production' })
+      context.json(res, { defaultEnvironment: config.defaultEnvironment })
       return true
     }
     const match = /^\/api\/admin\/analytics\/(overview|trends|users|rankings|features|conversations|skills|operations|health)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname)
     if (!match || (match[2] && match[1] !== 'users')) throw new GuideError('NOT_FOUND', 404)
     const input = Object.fromEntries(url.searchParams)
-    const query = Query.safeParse({ from: dayAt(Date.now() - 29 * 86400000), to: dayAt(Date.now()), environment: config.development ? 'development' : 'production', ...input, ...(match[2] ? { userId: match[2] } : {}) })
+    const query = Query.safeParse({ from: dayAt(Date.now() - 29 * 86400000), to: dayAt(Date.now()), environment: config.defaultEnvironment, ...input, ...(match[2] ? { userId: match[2] } : {}) })
     if (!query.success || [...url.searchParams.keys()].length !== Object.keys(input).length) throw new GuideError('INVALID_ANALYTICS_QUERY', 400)
     try { context.json(res, await store.query(match[1]!, query.data)) }
     catch { throw new GuideError('ANALYTICS_UNAVAILABLE', 503) }
     return true
   }
-  return { collect, admin, configured: config.development }
+  return { collect, admin, configured: config.enabled }
 }

@@ -13,7 +13,7 @@ const WebsiteConfigSchema = ReleaseConfigSchema.extend({
     }
   }),
   analyticsDirectory: z.string().min(1).default('../.runtime/website-analytics'),
-  trackingDevelopment: z.boolean().default(false),
+  trackingEnabled: z.boolean().default(false),
   contentDirectory: z.string().refine(value => value.trim().length > 0),
   adminPasswordEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
 })

@@ -26,7 +26,7 @@ const guides = new GuideStore(path.join(seedContent, 'guide'), config.contentDir
 const sync = new ContentSync(guides, media, path.resolve('content'))
 const knowledge = new KnowledgeStore(config.contentDirectory)
 const analytics = new TrackingStore(config.analyticsDirectory)
-const tracking = createTrackingHandlers(analytics, { development: dev && config.trackingDevelopment })
+const tracking = createTrackingHandlers(analytics, { enabled: config.trackingEnabled, defaultEnvironment: dev ? 'development' : 'production' })
 const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge)
 const maintenance = setInterval(() => void analytics.maintain().catch(() => {}), 3600000)
 maintenance.unref()
@@ -53,6 +53,7 @@ server.listen(config.port, config.host, () => {
   console.log(`Website: http://${config.host.includes(':') ? `[${config.host}]` : config.host}:${config.port}`)
   console.log(`Public website URL: ${config.websiteUrl}`)
   console.log(`Release directory: ${config.releaseDirectory}`)
+  console.log(`[tracking] collection=${tracking.configured ? 'enabled' : 'disabled'} scope=host authentication=none endpoint=/api/tracking/v1/events:batch`)
 })
 let closing = false
 async function close() {
