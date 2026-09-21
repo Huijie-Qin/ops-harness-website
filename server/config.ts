@@ -12,6 +12,8 @@ const WebsiteConfigSchema = ReleaseConfigSchema.extend({
       return z.NEVER
     }
   }),
+  analyticsDirectory: z.string().min(1).default('../.runtime/website-analytics'),
+  trackingDevelopment: z.boolean().default(false),
   contentDirectory: z.string().refine(value => value.trim().length > 0),
   adminPasswordEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,100}$/),
 })
@@ -27,6 +29,7 @@ export async function loadConfig(configPath = process.env.DSH_OPS_WEBSITE_CONFIG
     ...config,
     releaseDirectory: path.resolve(path.dirname(absolute), config.releaseDirectory),
     contentDirectory: path.resolve(path.dirname(absolute), config.contentDirectory),
+    analyticsDirectory: path.resolve(path.dirname(absolute), config.analyticsDirectory),
     configPath: absolute,
   }
 }

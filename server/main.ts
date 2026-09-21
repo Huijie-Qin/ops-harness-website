@@ -11,6 +11,8 @@ import { ReleaseAdmin } from './release-admin.js'
 import { KnowledgeStore } from './knowledge-store.js'
 import { createAdminHandler } from './admin-http.js'
 import { createGuideHandler } from './guide-http.js'
+import { TrackingStore } from './tracking/store.js'
+import { createTrackingHandlers } from './tracking/http.js'
 import { ContentSync } from './content-sync.js'
 
 const config = await loadConfig()
@@ -23,8 +25,14 @@ const media = new MediaStore(config.contentDirectory, seedContent)
 const guides = new GuideStore(path.join(seedContent, 'guide'), config.contentDirectory)
 const sync = new ContentSync(guides, media, path.resolve('content'))
 const knowledge = new KnowledgeStore(config.contentDirectory)
-const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge) })
-const guide: typeof guideApi = async (req, res, url) => await media.serve(req, res, url) || await guideApi(req, res, url)
+const analytics = new TrackingStore(config.analyticsDirectory)
+const tracking = createTrackingHandlers(analytics, { development: dev && config.trackingDevelopment })
+const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge)
+const maintenance = setInterval(() => void analytics.maintain().catch(() => {}), 3600000)
+maintenance.unref()
+await analytics.maintain()
+const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: async (...args) => await tracking.admin(...args) || await contentAdmin(...args) })
+const guide: typeof guideApi = async (req, res, url) => await tracking.collect(req, res, url) || await media.serve(req, res, url) || await guideApi(req, res, url)
 const server = createServer()
 const vite = dev ? await (await import('vite')).createServer({
   server: { middlewareMode: true, hmr: { server } }, appType: 'spa',
@@ -52,6 +60,8 @@ async function close() {
   closing = true
   const deadline = setTimeout(() => { server.closeAllConnections(); process.exit(1) }, 5000)
   deadline.unref()
+  clearInterval(maintenance)
+  await analytics.close()
   await vite?.close()
   server.close(() => { clearTimeout(deadline) })
   server.closeIdleConnections()

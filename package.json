@@ -19,7 +19,8 @@
     "vditor": "4.0.0",
     "vue": "3.5.42",
     "yaml": "2.9.0",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@dsh-ops/tracking": "file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz"
   },
   "devDependencies": {
     "@types/markdown-it": "14.2.0",

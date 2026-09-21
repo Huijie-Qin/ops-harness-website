@@ -14,3 +14,7 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 ```
 
 随后在官网更新 package.json 中的制品路径、此来源清单和锁文件，执行 `pnpm install`、`pnpm check`、`pnpm build`。确认旧客户端兼容性后在 Windows x64 完成跨仓库更新烟测。不得覆盖同版本制品或单独维护另一份协议源码。协议源码的 Git 历史保留在产品仓库，后续可以改用受控 registry 分发相同包。
+
+## 运营打点协议
+
+`dsh-ops-tracking-0.1.0-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/logger-tracking` 的 pnpm pack。来源、工作区输入及 SHA-256 见 [tracking.json](tracking.json)。官网仅导入 `@dsh-ops/tracking/contracts`，不加载 Host/Cordis。更新时在产品仓库完成 build/test 后 pack 到 vendor，以内容哈希命名新制品（避免同路径缓存旧包），更新 package.json、输入/制品哈希，执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。当前为明确标记的 sourceWorkingTree 联调制品，正式发布应从审核后的源码重新生成。

@@ -239,3 +239,11 @@ pnpm build
 Windows x64 上的真实 Desktop 更新烟测由产品仓库执行：先在官网运行 `pnpm build`，再在产品仓库设置 `DSH_OPS_WEBSITE_PROJECT` 为官网的绝对路径并运行 `pnpm desktop:smoke:updates`。这只用于跨仓库集成验收，日常运行不需要该变量。
 
 GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、测试及构建；跨仓库真实更新验收在产品仓库的 `Desktop and website update integration` 手动 workflow 中固定官网完整提交 SHA 后执行。
+
+## 运营统计
+
+管理员 `/admin` 新增“运营统计”，支持登录人数、DAU/近30天MAU、用户明细与排名、功能使用和操作明细。独立 SQLite 与采集 API 不改变普通 logger。本地 `pnpm dev` 开放免认证采集，产品开发 overlay 默认上传至 `http://127.0.0.1:4173`，无需 Token 环境变量。公司身份未接通时保持匿名；生产上传/验证后续实现，正常生产启动不开放采集。详见 [运营统计部署](docs/runbooks/operational-tracking.md) 和 [ADR 0019](docs/adr/0019-operational-tracking.md)。
+
+运营统计环境：管理员页面通过 `/api/admin/analytics/context` 获取默认环境。仅 `--dev` 且 `trackingDevelopment: true` 时默认为开发，其余默认为生产；手动选择保留为当前浏览器 UI 偏好。数据均按所选环境查询，空表先核对环境、日期与版本筛选。匿名对话、Token、Skill 可查看次数；登录用户数、DAU/MAU 和排名直接按终端当前 WeLink 工号归属。
+
+运营统计支持“全部环境”，跨环境、跨平台的同一工号统一去重；页面不再提供平台筛选。没有工号的旧事件保留匿名，不补归当前登录者。
