@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
+import { userSortKeys } from '../../shared/analytics.js'
 import { BatchSchema, MAX_BATCH_BYTES } from '@dsh-ops/tracking/contracts'
 import { GuideError } from '../guide-store.js'
 import type { AdminHandler } from '../admin-files.js'
@@ -7,7 +8,7 @@ import { dayAt, type Installation } from './database.js'
 import type { TrackingStore } from './store.js'
 export type TrackingHttpConfig = { enabled: boolean; defaultEnvironment: 'development' | 'production' }
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v => Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0,10) === v)
-const Query = z.object({ from: date, to: date, environment: z.enum(['all', 'production', 'development', 'test']).default('production'), platform: z.enum(['darwin','win32','linux','other']).optional(), appVersion: z.string().regex(/^[0-9][a-zA-Z0-9.+-]{0,63}$/).optional(), userId: z.uuid().optional(), offset: z.coerce.number().int().min(0).max(100000).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).strict().refine(q => q.from <= q.to && Date.parse(q.to) - Date.parse(q.from) <= 399 * 86400000)
+const Query = z.object({ from: date, to: date, environment: z.enum(['all', 'production', 'development', 'test']).default('production'), platform: z.enum(['darwin','win32','linux','other']).optional(), appVersion: z.string().regex(/^[0-9][a-zA-Z0-9.+-]{0,63}$/).optional(), userId: z.uuid().optional(), offset: z.coerce.number().int().min(0).max(100000).default(0), limit: z.coerce.number().int().min(1).max(100).default(50), search: z.string().trim().max(80).optional(), sort: z.enum(userSortKeys).optional(), direction: z.enum(['asc','desc']).optional() }).strict().refine(q => q.from <= q.to && Date.parse(q.to) - Date.parse(q.from) <= 399 * 86400000)
 function json(res: ServerResponse, value: unknown, status = 200) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)) }
 async function body(req: IncomingMessage, limit: number) {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json' || (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity')) throw new GuideError('JSON_REQUIRED', 415)
@@ -64,6 +65,7 @@ export function createTrackingHandlers(store: TrackingStore, config: TrackingHtt
     const input = Object.fromEntries(url.searchParams)
     const query = Query.safeParse({ from: dayAt(Date.now() - 29 * 86400000), to: dayAt(Date.now()), environment: config.defaultEnvironment, ...input, ...(match[2] ? { userId: match[2] } : {}) })
     if (!query.success || [...url.searchParams.keys()].length !== Object.keys(input).length) throw new GuideError('INVALID_ANALYTICS_QUERY', 400)
+    if ((query.data.search !== undefined && !['users','rankings'].includes(match[1]!)) || ((query.data.sort !== undefined || query.data.direction !== undefined) && match[1] !== 'users')) throw new GuideError('INVALID_ANALYTICS_QUERY', 400)
     try { context.json(res, await store.query(match[1]!, query.data)) }
     catch { throw new GuideError('ANALYTICS_UNAVAILABLE', 503) }
     return true

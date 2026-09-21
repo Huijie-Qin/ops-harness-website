@@ -2,10 +2,11 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, lstatSync, existsSync } from 'node:fs'
 import path from 'node:path'
+import { userSortKeys, type UserSortKey } from '../../shared/analytics.js'
 import { EventSchema, Id, isActive, isSuccess, type BatchResponse, type TrackingEvent } from '@dsh-ops/tracking/contracts'
 export type Installation = { tenantId: string; installationId: string; environment: 'production' | 'development' | 'test' }
 export type Principal = { issuer: string; subject: string; displayName: string; expiresAt: number }
-export type AnalyticsQuery = { from: string; to: string; environment: string; platform?: string | undefined; appVersion?: string | undefined; userId?: string | undefined; offset: number; limit: number }
+export type AnalyticsQuery = { from: string; to: string; environment: string; platform?: string | undefined; appVersion?: string | undefined; userId?: string | undefined; offset: number; limit: number; search?: string | undefined; sort?: UserSortKey | undefined; direction?: 'asc' | 'desc' | undefined }
 const DAY = 86400000
 export function dayAt(ms: number) { return new Date(ms + 8 * 3600000).toISOString().slice(0, 10) }
 function canonical(value: unknown): string {
@@ -205,10 +206,18 @@ export class TrackingDatabase {
     if (kind === 'trends') return { ...meta, rows: run(`SELECT day,COUNT(DISTINCT CASE WHEN active=1 THEN ${userKey} END) AS dau,COUNT(DISTINCT CASE WHEN ${foreground} THEN ${userKey} END) AS loginUsers FROM activity_facts f WHERE ${where} AND user_id IS NOT NULL GROUP BY day ORDER BY day`) }
     if (kind === 'features') return { ...meta, rows: run(`SELECT feature,COUNT(DISTINCT CASE WHEN active=1 THEN ${userKey} END) AS users,COUNT(DISTINCT CASE WHEN event_name IN ('page.view','feature.view') THEN ${userKey} END) AS visitors,COUNT(DISTINCT CASE WHEN active=1 THEN tenant||':'||installation||':'||interaction END) AS uses,COUNT(DISTINCT CASE WHEN success=1 THEN tenant||':'||installation||':'||operation END) AS successes,SUM(outcome='failed' AND initiator='user') AS failures FROM activity_facts f WHERE ${where} AND user_id IS NOT NULL GROUP BY feature ORDER BY users DESC,feature`) }
     if (kind === 'users' || kind === 'rankings') {
+      if (q.search) {
+        where += ' AND (instr(lower(u.display_name),lower(?))>0 OR instr(lower(u.subject),lower(?))>0)'
+        values.push(q.search, q.search)
+      }
+      // Only allow known SELECT aliases in ORDER BY; user input remains bound.
+      const order = kind === 'users' && q.sort && userSortKeys.includes(q.sort)
+        ? `${q.sort} ${q.direction === 'asc' ? 'ASC' : 'DESC'},f.user_id`
+        : 'activeDays DESC,successes DESC,features DESC,f.user_id'
       const rows = run(`SELECT f.user_id AS userId,u.display_name AS displayName,u.subject AS account,MIN(occurred_at) AS firstSeen,MAX(occurred_at) AS lastSeen,COUNT(DISTINCT CASE WHEN active=1 THEN day END) AS activeDays,COUNT(DISTINCT CASE WHEN active=1 THEN f.tenant||':'||installation||':'||interaction END) AS interactions,COUNT(DISTINCT CASE WHEN success=1 THEN f.tenant||':'||installation||':'||operation END) AS successes,COUNT(DISTINCT CASE WHEN active=1 THEN feature END) AS features,
         SUM(${message}) AS messages,COUNT(DISTINCT CASE WHEN ${message} AND r.conversation<>'' THEN f.tenant||':'||r.conversation END) AS conversations,COALESCE(SUM(${tokens}),0) AS totalTokens,COALESCE(SUM(r.result='succeeded'),0) AS skillLoads
-        FROM activity_facts f JOIN users u ON u.id=f.user_id LEFT JOIN runtime_facts r ON r.tenant=f.tenant AND r.id=f.id WHERE ${where} GROUP BY f.user_id ORDER BY activeDays DESC,successes DESC,features DESC,f.user_id LIMIT ? OFFSET ?`, [q.limit, q.offset])
-      const total = run(`SELECT COUNT(DISTINCT ${userKey}) AS value FROM activity_facts f WHERE ${where} AND user_id IS NOT NULL`)[0]?.value ?? 0
+        FROM activity_facts f JOIN users u ON u.id=f.user_id LEFT JOIN runtime_facts r ON r.tenant=f.tenant AND r.id=f.id WHERE ${where} GROUP BY f.user_id ORDER BY ${order} LIMIT ? OFFSET ?`, [q.limit, q.offset])
+      const total = run(`SELECT COUNT(DISTINCT ${userKey}) AS value FROM activity_facts f JOIN users u ON u.id=f.user_id WHERE ${where}`)[0]?.value ?? 0
       return { ...meta, rows, total, offset: q.offset, limit: q.limit }
     }
     if (kind === 'operations') return { ...meta, rows: run(`SELECT f.id AS eventId,f.occurred_at AS occurredAt,f.user_id AS userId,u.display_name AS displayName,f.feature,f.action,f.event_name AS eventName,f.initiator,f.outcome, e.body FROM activity_facts f JOIN tracking_events e ON e.tenant=f.tenant AND e.id=f.id LEFT JOIN users u ON u.id=f.user_id WHERE ${where} ORDER BY occurred_at DESC,f.id LIMIT ? OFFSET ?`, [q.limit, q.offset]).map(({ body, ...row }) => ({ ...row, durationMs: (JSON.parse(String(body)) as TrackingEvent).durationMs ?? null })), limit: q.limit, offset: q.offset, retentionDays: 90 }

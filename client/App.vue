@@ -10,6 +10,7 @@ import development from '../content/development.json'
 type Download = { name: string; size: number; sha512: string; platform: 'windows-x64' | 'macos-arm64'; url: string }
 type Release = { version: string; title: string; notes: string[]; publishedAt: string; downloads: Download[] }
 const page = window.location.pathname === '/admin' ? 'admin' : window.location.pathname === '/guide' ? 'guide' : window.location.pathname === '/releases' ? 'releases' : 'home'
+function skipAdmin(event:MouseEvent){if(page==='admin'){event.preventDefault();document.getElementById('main')?.focus()}}
 const menuOpen = ref(false)
 const menuToggle = ref<HTMLButtonElement | null>(null)
 const closeMenuOnEscape = (event: KeyboardEvent) => {
@@ -60,9 +61,9 @@ const features = [
 </script>
 
 <template>
-  <a class="skip-link" href="#main">跳到正文</a>
-  <header class="site-header" :class="{ 'home-header': page === 'home' }"><div class="header-inner"><a class="brand" href="/" aria-label="终端云工作助手 首页"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><button ref="menuToggle" class="menu-toggle" :aria-expanded="menuOpen" aria-controls="site-nav" @click="menuOpen = !menuOpen">{{ menuOpen ? '关闭菜单' : '菜单' }}</button><nav id="site-nav" :class="{ open: menuOpen }" aria-label="主导航"><a href="/" :aria-current="page === 'home' ? 'page' : undefined">产品介绍</a><a href="/guide" :aria-current="page === 'guide' ? 'page' : undefined">使用指南</a><a href="/releases" :aria-current="page === 'releases' ? 'page' : undefined">更新说明</a><a class="button small primary" href="/#download"><Icon name="download" :size="16" />下载桌面版</a></nav></div></header>
-  <main id="main">
+  <a class="skip-link" href="#main" @click="skipAdmin">跳到正文</a>
+  <header v-if="page !== 'admin'" class="site-header" :class="{ 'home-header': page === 'home' }"><div class="header-inner"><a class="brand" href="/" aria-label="终端云工作助手 首页"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><button ref="menuToggle" class="menu-toggle" :aria-expanded="menuOpen" aria-controls="site-nav" @click="menuOpen = !menuOpen">{{ menuOpen ? '关闭菜单' : '菜单' }}</button><nav id="site-nav" :class="{ open: menuOpen }" aria-label="主导航"><a href="/" :aria-current="page === 'home' ? 'page' : undefined">产品介绍</a><a href="/guide" :aria-current="page === 'guide' ? 'page' : undefined">使用指南</a><a href="/releases" :aria-current="page === 'releases' ? 'page' : undefined">更新说明</a><a class="button small primary" href="/#download"><Icon name="download" :size="16" />下载桌面版</a></nav></div></header>
+  <main id="main" tabindex="-1">
     <template v-if="page === 'home'">
       <section class="hero-stage">
         <HeroAtmosphere />
@@ -89,5 +90,5 @@ const features = [
       <section class="page-heading container"><span class="eyebrow text-only">更新说明</span><h1>每次更新，<br />让工作更进一步。</h1><p>了解新增能力、体验改进，以及当前可下载的版本。</p></section><section class="release-list container"><div v-if="error" class="notice" role="alert">更新记录暂时无法加载。<button class="text-button" @click="refresh">重试</button></div><p v-else-if="loading" role="status">正在加载更新记录…</p><article v-for="release in releases" :id="`v${release.version}`" :key="release.version" class="release-entry"><div class="release-meta"><span class="version-tag">v{{ release.version }}</span><time :datetime="release.publishedAt">{{ date(release.publishedAt) }}</time><span class="release-channel">{{ release.version.includes('-') ? '预览版' : '正式版' }}</span></div><div><h2>{{ release.title }}</h2><ul><li v-for="note in release.notes" :key="note">{{ note }}</li></ul><div class="release-downloads"><a v-for="download in release.downloads" :key="download.name" :href="download.url" class="text-link"><Icon name="download" :size="16" />{{ download.platform === 'windows-x64' ? 'Windows' : 'macOS' }} · {{ download.name.split('.').at(-1)!.toUpperCase() }}<span>{{ size(download.size) }}</span></a></div></div></article><article v-if="!loading && !releases.length" class="release-entry development-entry"><div class="release-meta"><span class="version-tag muted">开发中</span><span class="release-channel">尚未发布安装包</span></div><div><h2>{{ development.title }}</h2><ul><li v-for="note in development.notes" :key="note">{{ note }}</li></ul><p class="muted-note">以下为当前开发内容。正式版本及下载链接将在完成发布后显示。</p></div></article></section>
     </template>
   </main>
-  <footer class="site-footer container"><a class="brand" href="/"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><p>为日常工作而生。</p><div><a href="/guide">使用指南</a><a href="/releases">更新说明</a><span>© {{ new Date().getFullYear() }} 终端云工作助手</span></div></footer>
+  <footer v-if="page !== 'admin'" class="site-footer container"><a class="brand" href="/"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><p>为日常工作而生。</p><div><a href="/guide">使用指南</a><a href="/releases">更新说明</a><span>© {{ new Date().getFullYear() }} 终端云工作助手</span></div></footer>
 </template>

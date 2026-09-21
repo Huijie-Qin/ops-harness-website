@@ -1,138 +1,166 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ApiError, guideApi } from '../guide-api'
-const emit = defineEmits<{ error: [error: unknown] }>()
-type Row = Record<string, string | number | null>
-type Result = { rows?: Row[]; total?: number; dataThrough?: string | null; asOf?: string; [key: string]: unknown }
-const tabs = [{ id: 'overview', label: '总览' }, { id: 'users', label: '用户明细' }, { id: 'rankings', label: '活跃排名' }, { id: 'features', label: '功能使用' }, { id: 'conversations', label: '对话与 Token' }, { id: 'skills', label: 'Skill 使用' }, { id: 'operations', label: '操作明细' }, { id: 'health', label: '采集状态' }] as const
-const today = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10)
-const from = ref(new Date(Date.now() + 8 * 3600000 - 29 * 86400000).toISOString().slice(0, 10)), to = ref(today())
-const environment = ref(''), version = ref('')
-const environmentPreference = 'analytics.environment.v1'
-const validEnvironment = (value: unknown): value is string => typeof value === 'string' && ['all', 'production', 'development', 'test'].includes(value)
-function rememberEnvironment() {
-  try { if (validEnvironment(environment.value)) localStorage.setItem(environmentPreference, environment.value) } catch {}
-}
-const tab = ref<string>('overview'), busy = ref(false), error = ref(''), data = ref<Result>(), trend = ref<Row[]>([]), health = ref<Result>()
-const user = ref<{ id: string; name: string }>(), offset = ref(0)
+import Icon from '../Icon.vue'
+import WebsiteDialog from '../WebsiteDialog.vue'
+import { analyticsViews, type AnalyticsView } from '../admin-route'
+import { userSortKeys, type UserSortKey } from '../../shared/analytics'
+import { analyticsQuery, readAnalyticsState, today, validDates, validEnvironment, type AnalyticsState } from './state'
+import { columnsFor, defaultColumns, format, fullDate, healthReasons, number, type Row, type Result } from './presentation'
+
+const props = defineProps<{ view: AnalyticsView; query: string }>()
+const emit = defineEmits<{ error: [error: unknown]; navigate: [view: AnalyticsView, query: string, replace?: boolean] }>()
+const state = ref(readAnalyticsState(props.query))
+const filters = ref({ ...state.value }), search = ref(state.value.search)
+const busy = ref(false), error = ref(''), data = ref<Result>(), health = ref<Result>(), overview = ref<Result>(), profile = ref<Row>()
+const trend = ref<Row[]>([]), tableRegion = ref<HTMLElement>(), columnsOpen = ref(false), columnDraft = ref<string[]>([])
+const pageSizeMenu = ref<HTMLDetailsElement>()
+const selectedColumns = ref<Partial<Record<AnalyticsView,string[]>>>({})
+const returnTo = ref<{view: AnalyticsView; query: string; scroll: number}>()
+let restoreScroll: number | undefined
 let controller: AbortController | undefined
-const names: Record<string, string> = { tools: '工具', skills: '技能', knowledge: '知识库', experts: '专家', tasks: '定时任务', todos: '目标与待办', conversation: '会话', creation: '内容创作', authentication: '认证', navigation: '页面访问', succeeded: '成功', failed: '失败', cancelled: '已取消', partial: '部分完成', unknown: '未知', user: '人工', agent: '模型', scheduler: '定时执行', system: '系统' }
-Object.assign(names, {
-  root: '主会话', subagent: '子代理', 'conversation.model.usage': '模型用量', 'skill.load.completed': '加载技能',
-  'page.view': '页面访问', 'feature.view': '功能访问', 'auth.login.succeeded': '登录成功', 'auth.logout': '退出登录', 'conversation.message.accepted': '发送消息',
-  'tool.add': '添加工具', 'tool.remove': '移除工具', 'tool.config.save': '保存工具配置', 'tool.connection.test': '测试连接', 'tool.invoke': '调用工具',
-  'skill.install': '安装技能', 'skill.update': '更新技能', 'skill.uninstall': '卸载技能', 'skill.source.import': '导入技能', 'skill.source.save': '保存技能', 'skill.source.delete': '删除技能',
-  'knowledge.add': '添加知识库', 'knowledge.remove': '移除知识库', 'knowledge.bind': '绑定知识库', 'knowledge.unbind': '解绑知识库', 'knowledge.import': '导入知识', 'knowledge.update': '更新知识', 'knowledge.delete': '删除知识', 'knowledge.query': '检索知识',
-  'expert.use': '使用专家', 'expert.create': '创建专家', 'expert.clone': '克隆专家', 'expert.update': '更新专家', 'expert.delete': '删除专家',
-  'creation.generate': '生成内容', 'creation.publish': '保存作品', 'creation.export': '导出作品',
-  'task.create': '创建任务', 'task.update': '更新任务', 'task.pause': '暂停任务', 'task.resume': '恢复任务', 'task.delete': '删除任务', 'task.run': '执行任务',
-  'todo.refresh': '刷新待办', 'todo.suggestion.open': '查看建议',
-})
-const label = (value: unknown) => value == null || value === '' ? '—' : names[String(value)] ?? String(value)
+const environmentPreference = 'analytics.environment.v1'
+const title = computed(() => analyticsViews.find(item => item.id === props.view)!.label)
+const isUsers = computed(() => props.view === 'users' || props.view === 'rankings')
+const paginated = computed(() => ['users','rankings','operations','skills'].includes(props.view))
+const offset = computed(() => (state.value.page-1)*state.value.limit)
 const rows = computed(() => data.value?.rows ?? [])
-const peak = computed(() => Math.max(1, ...trend.value.map(row => Number(row.dau))))
-const metrics = computed(() => tab.value === 'conversations' ? [
-  ['人工对话次数', data.value?.messages, '实际进入处理流程的 Web 用户消息数'],
-  ['人工会话数', data.value?.conversations, '所选期间有人工消息的会话去重'],
-  ['已报告 Token', data.value?.totalTokens, '所有来源，含缓存；推理不重复相加'],
-  ['模型步骤', data.value?.modelSteps, '一次模型步骤可能请求多个工具'],
-  ['未报告用量的步骤', data.value?.missingUsage, '不估算 Token，不等于零消耗'],
-  ['匿名 Token', data.value?.anonymousTokens, '未记录工号，仍计入总量'],
-] : tab.value === 'skills' ? [
-  ['加载成功', data.value?.loads, 'Skill 指令已提供给模型'],
-  ['显式加载', data.value?.explicitLoads, '通过 /技能名 进入处理流程'],
-  ['模型加载', data.value?.modelLoads, '模型调用 skill 工具成功'],
-  ['加载失败', data.value?.failures, '有明确结果的模型加载失败'],
-  ['已识别使用人数', data.value?.users, '成功加载的登录工号去重'],
-  ['使用会话数', data.value?.conversations, '成功加载的会话去重，含子代理'],
-] : [
-  ['登录用户数', data.value?.loginUsers, '所选期间有前台活动的登录工号去重'],
-  ['主动使用人数', data.value?.activeUsers, '所选期间发起业务操作或对话的用户'],
-  ['DAU', data.value?.dau, `${to.value} 主动业务使用人数`],
-  ['MAU', data.value?.mau, '截至所选日，近 30 天去重'],
-  ['DAU / MAU', data.value?.stickiness == null ? '—' : `${(Number(data.value.stickiness) * 100).toFixed(1)}%`, '同一截至日的活跃比率'],
-  ['成功操作数', data.value?.successes, '人工操作；变更类需实际生效'],
-])
-const columns = computed(() => tab.value === 'users' || tab.value === 'rankings'
-  ? [['displayName', '用户'], ['account', '工号'], ['activeDays', '活跃天数'], ['interactions', '主动操作'], ['messages', '对话次数'], ['conversations', '会话数'], ['totalTokens', 'Token'], ['skillLoads', 'Skill 加载'], ['successes', '成功操作'], ['features', '使用功能数'], ['lastSeen', '最近活动']]
-  : tab.value === 'features' ? [['feature', '功能'], ['users', '使用人数'], ['visitors', '访问人数'], ['uses', '使用次数'], ['successes', '成功操作'], ['failures', '失败操作']]
-  : tab.value === 'conversations' ? [['initiator', '来源'], ['sessionKind', '会话类型'], ['messages', '人工消息'], ['conversations', '人工会话'], ['modelSteps', '模型步骤'], ['missingUsage', '用量缺失'], ['inputTokens', '普通输入'], ['cacheReadTokens', '缓存读取'], ['cacheWriteTokens', '缓存写入'], ['outputTokens', '输出'], ['reasoningTokens', '其中推理'], ['totalTokens', 'Token 总量']]
-  : tab.value === 'skills' ? [['skillName', 'Skill'], ['loads', '成功加载'], ['users', '已识别人数'], ['installations', '安装实例'], ['conversations', '会话数'], ['explicitLoads', '显式加载'], ['modelLoads', '模型加载'], ['userLoads', '人工回合加载'], ['failures', '加载失败']]
-  : tab.value === 'health' ? [['code', '采集提示'], ['count', '记录数']]
-  : [['occurredAt', '时间'], ['displayName', '用户'], ['feature', '功能'], ['action', '动作'], ['eventName', '阶段'], ['initiator', '来源'], ['outcome', '结果'], ['durationMs', '耗时（ms）']])
-function format(key: string, value: unknown) {
-  if (key === 'displayName' && !value) return '未识别 / 未提供姓名'
-  if (['occurredAt', 'lastSeen'].includes(key) && value) return new Date(String(value)).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-  if (key === 'eventName') return value === 'operation.accepted' ? '受理' : value === 'operation.finished' ? '完成' : label(value)
-  return label(value)
+const allColumns = computed(() => columnsFor(props.view))
+const columns = computed(() => allColumns.value.filter(c => (selectedColumns.value[props.view] ?? defaultColumns(props.view)).includes(c.key)))
+const groups = computed(() => {
+  const result: {label:string;span:number}[] = []
+  for (const column of columns.value) {
+    const last = result.at(-1)
+    if (last?.label === column.group) last.span++
+    else result.push({label:column.group,span:1})
+  }
+  return result
+})
+const totalPages = computed(() => data.value?.total == null ? undefined : Math.max(1,Math.ceil(data.value.total/state.value.limit)))
+const pages = computed(() => {
+  if (!totalPages.value) return [state.value.page]
+  const start = Math.max(1,Math.min(state.value.page-2,totalPages.value-4))
+  return Array.from({length:Math.min(5,totalPages.value)},(_,i)=>start+i)
+})
+const canNext = computed(() => !busy.value && offset.value+state.value.limit<=100000 && (totalPages.value ? state.value.page<totalPages.value : rows.value.length===state.value.limit))
+const filtersChanged = computed(() => ['from','to','environment','appVersion'].some(key => filters.value[key as keyof AnalyticsState] !== state.value[key as keyof AnalyticsState]))
+const lastReceived = computed(() => data.value?.dataThrough ? format('lastSeen', data.value.dataThrough) : '尚无数据')
+const userName = computed(() => String(profile.value?.displayName ?? profile.value?.account ?? '所选用户'))
+const metricSource = computed(() => isUsers.value ? overview.value : data.value)
+const metrics = computed(() => {
+  const d = metricSource.value
+  if(props.view==='conversations')return [
+    ['人工对话次数',d?.messages,'实际进入处理流程的 Web 用户消息数'],['人工会话数',d?.conversations,'所选期间有人工消息的会话去重'],['已报告 Token',d?.totalTokens,'所有来源，含缓存；推理不重复相加'],
+    ['模型步骤',d?.modelSteps,'一次模型步骤可能请求多个工具'],['未报告用量',d?.missingUsage,'步骤数；缺失不等于零消耗'],['匿名 Token',d?.anonymousTokens,'未记录工号，仍计入总量'],
+  ]
+  if(props.view==='skills')return [['加载成功',d?.loads,'指令已提供给模型，不代表任务完成'],['显式加载',d?.explicitLoads,'通过 /技能名进入处理流程'],['模型加载',d?.modelLoads,'模型调用 Skill 工具成功'],['加载失败',d?.failures,'有明确结果的加载失败'],['已识别人数',d?.users,'成功加载的登录工号去重'],['使用会话数',d?.conversations,'成功加载的会话去重，含子代理']]
+  if(props.view==='health')return [['所选范围事件',d?.collected,'按事件 ID 去重，不代表完整采集率'],['安装实例',d?.installations,'与用户人数分别统计'],['匿名事件',d?.anonymousEvents,'未归入用户活跃指标']]
+  const core = [['登录用户数',d?.loginUsers,'所选期间有前台活动的登录工号去重'],['主动使用人数',d?.activeUsers,'所选期间发起业务操作或对话的用户'],['当日活跃',d?.dau,`${state.value.to} 的人工业务使用人数`],['成功操作数',d?.successes,'人工操作；变更类需实际生效']]
+  return props.view==='overview'?[...core,['MAU',d?.mau,'截至所选日，近 30 天去重'],['DAU / MAU',d?.stickiness==null?'—':`${(Number(d.stickiness)*100).toFixed(1)}%`,'同一截至日的活跃比率']]:isUsers.value?core:[]
+})
+const description = computed(() => ({overview:'了解用户活跃与功能使用，按登录工号跨设备去重。',users:'查看和比较各用户的使用情况，了解用户活跃与功能使用。',rankings:'按活跃天数、成功操作数、使用功能数依次排序。',features:'区分功能访问与实际使用，了解各功能的使用覆盖。',conversations:'查看人工对话和模型报告的用量，区分来源与会话类型。',skills:'了解 Skill 指令的加载与使用覆盖，加载成功不代表任务完成。',operations:'查看操作的受理、完成与执行结果，明细保留 90 天。',health:'查看采集记录与拒收提示，了解当前数据的覆盖情况。'})[props.view])
+const scopeNote = computed(() => ({overview:'DAU 只计已识别用户的人工业务受理，后台轮询与自动执行不计入。',users:'用户按工号跨设备去重；匿名记录不计入用户人数。',rankings:'排名仅描述产品使用情况，不代表工作质量或绩效。',features:'访问人数与使用人数分别统计，浏览页面不等于实际使用。',conversations:'Token = 普通输入 + 缓存读取 + 缓存写入 + 输出；推理已包含在输出中。',skills:'匿名加载计次数，不计用户人数；同名 Skill 暂不按版本与来源拆分。',operations:'受理与完成分别展示；同一操作在聚合统计中只计一次。',health:'上方指标遵循当前筛选；下方拒收原因是服务历史累计，不按日期或用户筛选。'})[props.view])
+const chart = computed(() => {
+  const count=Math.round((Date.parse(state.value.to)-Date.parse(state.value.from))/86400000)+1
+  const reported=new Map(trend.value.map(row=>[String(row.day),Number(row.dau)]))
+  const values=Array.from({length:count},(_,index)=>{const day=new Date(Date.parse(state.value.from)+index*86400000).toISOString().slice(0,10);return {day,value:reported.get(day)}})
+  return {values,peak:Math.max(3,Math.ceil(Math.max(0,...trend.value.map(row=>Number(row.dau)))/3)*3)}
+})
+function navigate(patch: Partial<AnalyticsState> = {}, view = props.view, replace = false) {
+  const next={...state.value,...patch}
+  emit('navigate',view,analyticsQuery(next),replace)
 }
-async function load() {
-  controller?.abort(); const request = new AbortController(); controller = request
-  if (!from.value || !to.value || from.value > to.value || Date.parse(to.value) - Date.parse(from.value) > 399 * 86400000) { busy.value = false; error.value = '请选择不超过 400 天的有效日期范围。'; return }
-  busy.value = true; error.value = ''
-  try {
-    if (!validEnvironment(environment.value)) {
-      const context = await guideApi<{ defaultEnvironment: string }>('/api/admin/analytics/context', { signal: request.signal })
-      if (request.signal.aborted) return
-      if (!validEnvironment(context.defaultEnvironment)) throw new Error('INVALID_ANALYTICS_CONTEXT')
-      let saved: string | null = null
-      try { saved = localStorage.getItem(environmentPreference) } catch {}
-      environment.value = validEnvironment(saved) ? saved : context.defaultEnvironment
+function apply() {
+  if (!validDates(filters.value.from,filters.value.to)) { error.value='请选择不超过 400 天、且不晚于今天的有效日期范围。'; return }
+  if(filters.value.appVersion && !/^[0-9][a-zA-Z0-9.+-]{0,63}$/.test(filters.value.appVersion)){error.value='请输入有效的应用版本号。';return}
+  try{localStorage.setItem(environmentPreference,filters.value.environment)}catch{}
+  navigate({from:filters.value.from,to:filters.value.to,environment:filters.value.environment,appVersion:filters.value.appVersion.trim(),page:1})
+  if(!filtersChanged.value)void load()
+}
+function applySearch(){navigate({search:search.value.trim(),page:1})}
+function sortBy(key:string){if(props.view!=='users'||!userSortKeys.includes(key as UserSortKey))return;navigate({sort:key as UserSortKey,direction:state.value.sort===key&&state.value.direction==='desc'?'asc':'desc',page:1})}
+function ariaSort(key:string):'ascending'|'descending'|'none'|undefined{return props.view==='users'?state.value.sort===key?state.value.direction==='asc'?'ascending':'descending':'none':undefined}
+function inspect(row:Row){returnTo.value={view:props.view,query:props.query,scroll:tableRegion.value?.scrollTop??0};navigate({user:String(row.userId),page:1,search:'',sort:''},'operations')}
+function returnUsers(){const previous=returnTo.value;returnTo.value=undefined;if(previous){restoreScroll=previous.scroll;emit('navigate',previous.view,previous.query)}else navigate({user:'',page:1,search:'',sort:''},'users')}
+function openColumns(){columnDraft.value=columns.value.map(c=>c.key);columnsOpen.value=true}
+function saveColumns(){selectedColumns.value={...selectedColumns.value,[props.view]:allColumns.value.filter((c,i)=>i===0||columnDraft.value.includes(c.key)).map(c=>c.key)};columnsOpen.value=false;try{localStorage.setItem('analytics.columns.v1',JSON.stringify(selectedColumns.value))}catch{}}
+function closePageSize(){if(pageSizeMenu.value){pageSizeMenu.value.open=false;pageSizeMenu.value.querySelector('summary')?.focus()}}
+function changePageSize(limit:number){closePageSize();navigate({limit,page:1})}
+async function load(){
+  controller?.abort();const request=new AbortController();controller=request;busy.value=true;error.value=''
+  try{
+    if(validEnvironment(state.value.environment)&&props.query!==analyticsQuery(state.value)){navigate({},props.view,true);return}
+    if(!validEnvironment(state.value.environment)){
+      const context=await guideApi<{defaultEnvironment:string}>('/api/admin/analytics/context',{signal:request.signal})
+      if(request.signal.aborted)return
+      let saved:string|null=null;try{saved=localStorage.getItem(environmentPreference)}catch{}
+      const environment=validEnvironment(saved)?saved:context.defaultEnvironment
+      if(!validEnvironment(environment))throw new Error('INVALID_ANALYTICS_CONTEXT')
+      navigate({environment},props.view,true);return
     }
-    const query = new URLSearchParams({ from: from.value, to: to.value, environment: environment.value, offset: String(offset.value), limit: '50' })
-    if (version.value) query.set('appVersion', version.value)
-    if (user.value) query.set('userId', user.value.id)
-    const call = (kind: string) => guideApi<Result>(`/api/admin/analytics/${kind}?${query}`, { signal: request.signal })
-    const [result, state, trends] = await Promise.all([call(tab.value), call('health'), tab.value === 'overview' ? call('trends') : Promise.resolve(undefined)])
-    if (request.signal.aborted) return
-    data.value = result; health.value = state; trend.value = trends?.rows ?? []
-  } catch (e) {
-    if (request.signal.aborted) return
-    error.value = '统计暂时无法读取，请稍后重试。已显示的数据可能不是最新。'
-    if (e instanceof ApiError && ['AUTH_REQUIRED','CSRF_REJECTED'].includes(e.code)) emit('error', e)
-  } finally { if (controller === request) busy.value = false }
+    const q=new URLSearchParams({from:state.value.from,to:state.value.to,environment:state.value.environment,offset:String(offset.value),limit:String(state.value.limit)})
+    if(state.value.appVersion)q.set('appVersion',state.value.appVersion)
+    if(state.value.user)q.set('userId',state.value.user)
+    const call=(kind:string,extra:Record<string,string>={})=>guideApi<Result>(`/api/admin/analytics/${kind}?${new URLSearchParams({...Object.fromEntries(q),...extra})}`,{signal:request.signal})
+    const extra:Record<string,string>={}
+    if(isUsers.value&&state.value.search)extra.search=state.value.search
+    if(props.view==='users'&&state.value.sort){extra.sort=state.value.sort;extra.direction=state.value.direction}
+    const [result,healthResult,overviewResult,trends,userResult]=await Promise.all([
+      call(props.view,extra),props.view==='health'?Promise.resolve(undefined):call('health'),isUsers.value?call('overview'):Promise.resolve(undefined),props.view==='overview'?call('trends'):Promise.resolve(undefined),state.value.user?call(`users/${state.value.user}`,{offset:'0'}):Promise.resolve(undefined),
+    ])
+    if(request.signal.aborted)return
+    data.value=result;health.value=healthResult??result;overview.value=overviewResult;trend.value=trends?.rows??[];profile.value=userResult?.rows?.[0]
+    if(result.total!=null&&state.value.page>1&&offset.value>=result.total){navigate({page:Math.max(1,Math.ceil(result.total/state.value.limit))},props.view,true);return}
+    await nextTick();if(restoreScroll!==undefined&&tableRegion.value){tableRegion.value.scrollTop=restoreScroll;restoreScroll=undefined}
+  }catch(e){if(request.signal.aborted)return;error.value='统计暂时无法读取，请重试。已显示的数据可能不是最新。';if(e instanceof ApiError&&['AUTH_REQUIRED','CSRF_REJECTED'].includes(e.code))emit('error',e)}
+  finally{if(controller===request)busy.value=false}
 }
-function switchTab(id: string) { tab.value = id; offset.value = 0; data.value = undefined; void load() }
-function apply() { offset.value = 0; data.value = undefined; void load() }
-function inspect(row: Row) { user.value = { id: String(row.userId), name: String(row.displayName || row.account) }; switchTab('operations') }
-function clearUser() { user.value = undefined; apply() }
-function page(direction: number) { offset.value = Math.max(0, offset.value + direction * 50); void load() }
-onMounted(load)
-onBeforeUnmount(() => controller?.abort())
+watch(()=>[props.view,props.query],()=>{state.value=readAnalyticsState(props.query);filters.value={...state.value};search.value=state.value.search;data.value=undefined;overview.value=undefined;health.value=undefined;profile.value=undefined;columnsOpen.value=false;void load()})
+onMounted(()=>{try{const saved=JSON.parse(localStorage.getItem('analytics.columns.v1')??'{}');for(const entry of analyticsViews){const keys=saved[entry.id];if(Array.isArray(keys))selectedColumns.value[entry.id]=columnsFor(entry.id).filter((c,i)=>i===0||keys.includes(c.key)).map(c=>c.key)}}catch{}void load()})
+onBeforeUnmount(()=>controller?.abort())
 </script>
+
 <template>
   <section class="analytics" aria-label="运营统计" :aria-busy="busy">
-    <header class="analytics-heading"><div><h2>运营统计</h2><p>了解用户活跃与功能使用。按工作助手当前登录工号跨设备去重，时间统一为北京时间。</p></div><button class="button secondary" :disabled="busy" @click="load">{{busy?'正在更新…':'刷新数据'}}</button></header>
+    <div class="analytics-topline"><div class="analytics-breadcrumb">运营统计 <span>/</span> <strong>{{title}}</strong></div><div class="analytics-freshness"><span :title="fullDate(data?.dataThrough)">最近收到数据 <span class="freshness-time">{{lastReceived}}</span><span class="freshness-zone"> · 北京时间</span></span><button class="button secondary" :disabled="busy" @click="load">{{busy?'正在更新…':'刷新数据'}}</button></div></div>
+    <header class="analytics-heading"><h1>{{view==='users'?'用户使用明细':title}}</h1><p>{{description}}</p></header>
     <form class="analytics-filters" @submit.prevent="apply">
-      <label>开始日期<input v-model="from" type="date" required /></label><label>结束日期<input v-model="to" type="date" :max="today()" required /></label>
-      <label>应用版本<input v-model="version" placeholder="全部版本" maxlength="64" pattern="[0-9][a-zA-Z0-9.+-]{0,63}" /></label>
-      <fieldset :disabled="busy"><legend>环境</legend><label v-for="option in [['all','全部环境'],['production','生产'],['development','开发'],['test','测试']]" :key="option[0]"><input v-model="environment" type="radio" name="analytics-environment" :value="option[0]" @change="rememberEnvironment" />{{option[1]}}</label></fieldset>
+      <label>开始日期<input v-model="filters.from" type="date" :max="today()" required /></label><label>结束日期<input v-model="filters.to" type="date" :max="today()" required /></label>
+      <label>应用版本<input v-model="filters.appVersion" placeholder="全部版本" maxlength="64" pattern="[0-9][a-zA-Z0-9.+-]{0,63}" /></label>
+      <fieldset><legend>环境</legend><label v-for="option in [['all','全部环境'],['production','生产环境'],['development','开发环境'],['test','测试环境']]" :key="option[0]"><input v-model="filters.environment" type="radio" name="analytics-environment" :value="option[0]" />{{option[1]}}</label></fieldset>
       <button class="button primary" :disabled="busy">应用筛选</button>
     </form>
-    <p v-if="user" class="analytics-user">正在查看：{{user.name}}<button class="button secondary" @click="clearUser">返回全部用户</button></p>
-    <nav class="analytics-tabs" aria-label="统计视图"><button v-for="item in tabs" :key="item.id" :aria-pressed="tab===item.id" @click="switchTab(item.id)">{{item.label}}</button></nav>
-    <p v-if="error" class="admin-error" role="alert">{{error}}</p>
-    <p v-if="busy && !data" role="status">正在读取统计…</p>
-    <p v-else-if="health && !Number(health.collected)" class="analytics-empty">当前环境与筛选范围暂无采集记录。请确认上方环境与终端配置一致；本地调试数据请在“开发”环境查看。</p>
-    <p v-else-if="health && !Number(health.identifiedEvents)" class="analytics-notice">当前范围的 {{health.anonymousEvents}} 条事件未记录登录工号，仍可查看操作、对话与 Skill 次数。新版工作助手会随打点记录左下角的登录工号；历史匿名记录不归入当前账号。</p>
+    <p v-if="filtersChanged" class="analytics-pending" role="status">筛选条件已修改，应用后更新数据。</p>
+    <div v-if="state.user" class="analytics-user"><span>当前用户 <strong>{{userName}}</strong><small>沿用当前日期、环境与版本</small></span><button class="button secondary" @click="returnUsers">返回用户列表</button></div>
+    <div v-if="error" class="analytics-error" role="alert">{{error}}<button class="text-button" :disabled="busy" @click="load">重试</button></div>
+    <p v-if="busy&&!data" class="analytics-loading" role="status">正在读取统计数据…</p>
     <template v-if="data">
-      <div v-if="['overview','conversations','skills'].includes(tab)" class="analytics-metrics"><article v-for="metric in metrics" :key="String(metric[0])"><span>{{metric[0]}}</span><strong>{{metric[1]??'—'}}</strong><small>{{metric[2]}}</small></article></div>
-      <div v-if="tab==='overview'" class="analytics-chart"><h3>每日主动活跃用户</h3><p v-if="!trend.length" class="analytics-empty">所选范围暂无已识别用户的主动行为。</p><ol v-else aria-label="每日活跃人数"><li v-for="row in trend" :key="String(row.day)"><time>{{row.day}}</time><span class="analytics-bar"><i :style="{width:`${Number(row.dau)/peak*100}%`}"></i></span><strong>{{row.dau}}</strong></li></ol></div>
-      <div v-if="tab==='health'" class="analytics-metrics"><article><span>所选范围事件</span><strong>{{data.collected}}</strong><small>按事件 ID 去重；不代表完整采集率</small></article><article><span>已上报的安装实例</span><strong>{{data.installations}}</strong><small>安装实例数与用户人数分别统计</small></article><article><span>所选范围匿名事件</span><strong>{{data.anonymousEvents}}</strong><small>未归入用户活跃指标</small></article></div>
-      <template v-if="tab!=='overview'">
-        <p v-if="tab==='rankings'" class="analytics-caption">按活跃天数、成功操作数、使用功能数依次排名。</p>
-        <p v-if="tab==='operations'" class="analytics-caption">操作明细保留 90 天。受理与完成分别显示；同一操作在统计中只计一次。</p>
-        <p v-if="tab==='conversations'" class="analytics-caption">Token = 普通输入 + 缓存读取 + 缓存写入 + 输出；推理已包含在输出中。仅统计已结束步骤报告的用量，模型重试、辅助模型请求和未结束步骤可能未覆盖。</p>
-        <p v-if="tab==='skills'" class="analytics-caption">按运行时 Skill 名称聚合，版本与来源暂不拆分。加载成功不代表整个任务成功；安装、目录浏览和未执行的点击不算使用。匿名加载计次数，不计用户人数。</p>
-        <div v-if="rows.length" class="analytics-table" role="region" aria-label="统计明细" tabindex="0"><table><thead><tr><th v-if="tab==='rankings'" scope="col">排名</th><th v-for="column in columns" :key="column[0]" scope="col">{{column[1]}}</th></tr></thead><tbody><tr v-for="(row,index) in rows" :key="String(row.userId??row.eventId??row.skillName??row.feature??row.code??`${row.initiator}:${row.sessionKind}`)"><td v-if="tab==='rankings'">{{offset+index+1}}</td><td v-for="column in columns" :key="column[0]"><button v-if="column[0]==='displayName' && (tab==='users'||tab==='rankings')" class="analytics-link" @click="inspect(row)">{{format(column[0]!,row[column[0]!])}}</button><span v-else>{{format(column[0]!,row[column[0]!])}}</span></td></tr></tbody></table></div>
-        <p v-else-if="!busy" class="analytics-empty">{{tab==='health'?'暂无拒收记录。':'没有符合筛选条件的记录。'}}</p>
-        <div v-if="['users','rankings','operations','skills'].includes(tab)" class="analytics-pages"><button class="button secondary" :disabled="busy||offset===0" @click="page(-1)">上一页</button><span>第 {{offset/50+1}} 页<span v-if="data.total!=null"> · 共 {{data.total}} {{tab==='skills'?'项':'人'}}</span></span><button class="button secondary" :disabled="busy||rows.length<50||(data.total!=null&&offset+50>=data.total)" @click="page(1)">下一页</button></div>
-      </template>
-      <p class="analytics-caption">人工对话覆盖当前官方 Web 消息入口；其他提交来源保留为未知，子代理单列。用户明细可点击姓名，再切换视图查看该用户的对话与 Skill 使用。</p>
-      <p class="analytics-caption">最后收到数据：{{data.dataThrough?new Date(String(data.dataThrough)).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'尚无数据'}} · DAU 只计人工业务受理，后台轮询与自动执行单列。</p>
+      <div v-if="metrics.length" class="analytics-metrics" :class="{'six-metrics':metrics.length===6}"><article v-for="metric in metrics" :key="String(metric[0])"><span class="metric-help" tabindex="0" :aria-label="`${metric[0]}：${metric[2]}`">{{metric[0]}}<span role="tooltip">{{metric[2]}}</span></span><strong>{{number(metric[1])}}</strong></article></div>
+      <p v-if="health&&!Number(health.collected)" class="analytics-empty">当前环境与筛选范围暂无采集记录。可调整日期或环境后重试。</p>
+      <p v-else-if="health&&!Number(health.identifiedEvents)" class="analytics-notice">当前范围的 {{number(health.anonymousEvents)}} 条事件未记录登录工号。仍可查看操作、对话与 Skill 次数；历史匿名记录不归入当前账号。</p>
+      <div v-if="view==='overview'" class="analytics-chart"><div class="analytics-block-heading"><div><h2>每日主动活跃用户</h2><p>按北京时间统计 · {{state.from}} 至 {{state.to}}</p></div><span class="chart-legend">主动使用人数</span></div>
+        <p v-if="!trend.length" class="analytics-empty">所选范围暂无已识别用户的主动行为。</p>
+        <template v-else><div class="analytics-chart-scroll"><svg :viewBox="`0 0 ${Math.max(800,chart.values.length*12)} 250`" role="img" aria-label="每日主动活跃用户柱状图；详细数值见下方每日数据"><g v-for="n in [0,1,2,3]" :key="n"><line x1="36" :x2="Math.max(800,chart.values.length*12)-12" :y1="210-n*60" :y2="210-n*60" stroke="var(--border-subtle)"/><text x="28" :y="214-n*60" text-anchor="end" fill="var(--text-secondary)" font-size="11">{{number(Math.ceil(chart.peak*n/3))}}</text></g><g v-for="(point,index) in chart.values" :key="point.day"><rect :x="42+index*(Math.max(800,chart.values.length*12)-60)/chart.values.length" :y="point.value==null?207:210-point.value/chart.peak*180" :width="Math.max(3,(Math.max(800,chart.values.length*12)-60)/chart.values.length*.65)" :height="point.value==null?3:Math.max(2,point.value/chart.peak*180)" :fill="point.value==null?'var(--border-default)':'var(--accent-primary)'" rx="2"><title>{{point.day}}：{{point.value==null?'无已识别用户记录':`${point.value} 人`}}</title></rect><text v-if="index%Math.max(1,Math.ceil(chart.values.length/8))===0" :x="42+index*(Math.max(800,chart.values.length*12)-60)/chart.values.length" y="238" fill="var(--text-secondary)" font-size="11">{{point.day.slice(5)}}</text></g></svg></div><p class="analytics-caption">浅灰标记表示当日没有已识别用户记录，不能据此判断采集是否完整；当天数据尚未结束。</p><details class="analytics-definitions"><summary>查看每日数据</summary><div class="daily-data"><p v-for="point in chart.values" :key="point.day"><time>{{point.day}}</time><span>{{point.value==null?'无已识别记录':`${number(point.value)} 人`}}</span></p></div></details></template>
+      </div>
+      <section v-else class="analytics-data" :aria-label="title">
+        <div class="analytics-table-toolbar"><h2>{{title}}<span v-if="data.total!=null">（{{number(data.total)}} {{isUsers?'人':'项'}}）</span></h2><div class="analytics-table-tools"><form v-if="isUsers" class="analytics-search" role="search" @submit.prevent="applySearch"><input v-model="search" type="search" aria-label="搜索姓名或工号" placeholder="搜索姓名 / 工号" maxlength="80" /><button type="submit" :disabled="busy">搜索</button></form><button class="button secondary" @click="openColumns"><Icon name="grid" :size="15" />列设置</button></div></div>
+        <p v-if="state.search&&isUsers" class="analytics-search-note">搜索“{{state.search}}”的结果 <button class="text-button" @click="navigate({search:'',page:1})">清除搜索</button><span> · 上方指标为当前时段的全部用户</span></p>
+        <div v-if="rows.length" ref="tableRegion" class="analytics-table" role="region" :aria-label="`${title}表格，可横向滚动查看完整字段`" tabindex="0"><table>
+          <thead><tr class="analytics-group-row"><th v-if="view==='rankings'" rowspan="2" scope="col" class="rank-column">排名</th><th v-for="(group,index) in groups" :key="`${group.label}-${index}`" scope="colgroup" :colspan="group.span">{{group.label}}</th><th v-if="isUsers" rowspan="2" scope="col" class="detail-column"><span class="sr-only">查看用户详情</span></th></tr>
+            <tr><th v-for="(column,index) in columns" :key="column.key" scope="col" :aria-sort="ariaSort(column.key)" :class="{numeric:column.numeric,'identity-column':index===0}"><button v-if="view==='users'" class="analytics-sort" :disabled="busy" @click="sortBy(column.key)">{{column.label}}<Icon name="chevron" :size="11" :class="['sort-indicator',state.sort===column.key?state.direction:'inactive']" /></button><template v-else>{{column.label}}</template></th></tr>
+          </thead><tbody><tr v-for="(row,index) in rows" :key="String(row.userId??row.eventId??row.skillName??row.feature??row.code??`${row.initiator}:${row.sessionKind}`)"><td v-if="view==='rankings'" class="rank-column">{{offset+index+1}}</td><td v-for="(column,columnIndex) in columns" :key="column.key" :class="{numeric:column.numeric,'identity-column':columnIndex===0}">
+              <button v-if="column.key==='displayName'&&isUsers" class="analytics-identity" @click="inspect(row)"><strong>{{row.displayName||row.account||'未提供姓名'}}</strong><small>{{row.displayName===row.account?'姓名未提供':row.account}}</small></button>
+              <span v-else-if="column.key==='outcome'" class="analytics-status" :class="String(row.outcome??'unknown')">{{format(column.key,row[column.key])}}</span>
+              <span v-else-if="column.key==='code'" class="analytics-health-reason">{{healthReasons[String(row.code)]??'其他采集提示'}}<small>{{row.code}}</small></span>
+              <span v-else :title="['lastSeen','occurredAt'].includes(column.key)?fullDate(row[column.key]):undefined">{{format(column.key,row[column.key])}}</span>
+            </td><td v-if="isUsers" class="detail-column"><button class="analytics-view-user" :aria-label="`查看 ${row.displayName||row.account} 的使用明细`" @click="inspect(row)">查看<Icon name="chevron" :size="15" /></button></td></tr></tbody>
+        </table></div>
+        <div v-else class="analytics-empty"><strong>{{view==='health'?'暂无拒收记录':'没有符合筛选条件的记录'}}</strong><p>{{view==='health'?'服务尚未记录被拒收的事件。':state.search?'试试其他姓名或工号，或清除搜索条件。':state.user?'所选用户在当前范围内没有此类记录。':'可调整上方日期、环境或版本。'}}</p><button v-if="state.search" class="button secondary" @click="navigate({search:'',page:1})">清除搜索</button></div>
+        <div v-if="paginated" class="analytics-pagination"><span>{{rows.length?`${number(offset+1)}–${number(offset+rows.length)}`:'0'}}<template v-if="data.total!=null"> / {{number(data.total)}}</template> {{isUsers?'人':view==='skills'?'项':'条记录'}}</span><div><button :disabled="busy||state.page===1" aria-label="上一页" @click="navigate({page:state.page-1})"><Icon class="previous-icon" name="chevron" :size="15" /></button><button v-for="page in pages" :key="page" :aria-current="state.page===page?'page':undefined" :disabled="busy" :aria-label="`第 ${page} 页`" @click="navigate({page})">{{page}}</button><button :disabled="!canNext" aria-label="下一页" @click="navigate({page:state.page+1})"><Icon name="chevron" :size="15" /></button><details ref="pageSizeMenu" class="analytics-page-size" @keydown.esc.prevent="closePageSize"><summary>{{state.limit}} 条 / 页</summary><div><button v-for="limit in [10,25,50,100]" :key="limit" :disabled="busy" @click="changePageSize(limit)">{{limit}} 条 / 页</button></div></details></div></div>
+      </section>
+      <div class="analytics-footer"><p>{{scopeNote}}</p><details class="analytics-definitions"><summary>统计口径</summary><p>所有时间为北京时间。用户以当前上报的登录工号跨设备去重，历史匿名事件不会追归之后登录的用户。人工对话仅覆盖官方 Web 消息入口；未知来源和子代理单独统计。</p><p v-if="view==='conversations'">仅统计已结束步骤报告的 Token。缺失用量不估算为零；模型重试、辅助模型请求和未结束步骤可能未覆盖。推理为输出的子集，不重复计入总量。</p><p v-if="view==='skills'">成功加载表示 Skill 指令已提供给模型，不等于任务完成。安装、目录浏览和未执行的点击不计为使用；同名技能暂不按版本或来源拆分。</p><p>统计生成时间：{{fullDate(data.asOf)}}。最后收到数据：{{fullDate(data.dataThrough)}}。</p></details></div>
     </template>
+    <WebsiteDialog v-if="columnsOpen" title="设置显示列" message="保留身份列，选择需要比较的指标。设置仅保存在当前浏览器。" confirm-label="应用" @cancel="columnsOpen=false" @confirm="saveColumns"><fieldset class="analytics-column-choices"><legend class="sr-only">显示的字段</legend><label v-for="(column,index) in allColumns" :key="column.key"><input v-model="columnDraft" type="checkbox" :value="column.key" :disabled="index===0" />{{column.label}}<small>{{column.group}}</small></label></fieldset><button class="text-button" @click="columnDraft=defaultColumns(view)">恢复默认列</button></WebsiteDialog>
   </section>
 </template>
-<style scoped>
-.analytics{color:var(--text-primary);display:grid;gap:20px}.analytics-heading{display:flex;align-items:center;justify-content:space-between;gap:20px}.analytics h2,.analytics h3{margin:0 0 8px}.analytics-heading p,.analytics-caption{color:var(--text-secondary);font-size:13px}.analytics-filters{display:flex;flex-wrap:wrap;gap:16px;align-items:end;padding:18px;border:1px solid var(--border-default);border-radius:12px}.analytics-filters>label{display:grid;gap:7px;font-size:13px}.analytics input:not([type=radio]){padding:8px 10px;border:1px solid var(--border-default);border-radius:6px;background:var(--bg-primary);color:inherit;max-width:180px}.analytics fieldset{border:0;padding:0;display:flex;gap:10px;flex-wrap:wrap}.analytics legend{font-size:13px;margin-bottom:8px}.analytics fieldset label{font-size:13px;display:flex;align-items:center;gap:4px}.analytics-tabs{display:flex;flex-wrap:wrap;gap:8px}.analytics-tabs button{padding:9px 14px;border:1px solid var(--border-default);background:var(--bg-primary);border-radius:8px;cursor:pointer;color:inherit}.analytics-tabs [aria-pressed=true]{color:var(--accent-primary);border-color:var(--accent-primary)}.analytics-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.analytics-metrics article{display:grid;gap:12px;border:1px solid var(--border-default);padding:20px;border-radius:12px}.analytics-metrics strong{font-size:32px;font-variant-numeric:tabular-nums}.analytics-metrics small{color:var(--text-secondary)}.analytics-chart{padding:20px;border:1px solid var(--border-default);border-radius:12px}.analytics-chart ol{list-style:none;padding:0;max-height:350px;overflow:auto}.analytics-chart li{display:grid;grid-template-columns:100px 1fr 55px;gap:15px;align-items:center;margin:10px 0;font-size:13px}.analytics-bar{height:12px;background:var(--border-subtle);border-radius:4px;overflow:hidden}.analytics-bar i{display:block;height:100%;background:var(--accent-primary)}.analytics-table{overflow:auto;border:1px solid var(--border-default);border-radius:10px}.analytics table{border-collapse:collapse;width:100%;font-size:13px}.analytics th,.analytics td{padding:13px 15px;text-align:left;border-bottom:1px solid var(--border-subtle);white-space:nowrap}.analytics th{color:var(--text-secondary);background:var(--border-subtle)}.analytics-link{color:var(--accent-primary);background:none;border:0;padding:0;text-decoration:underline;cursor:pointer}.analytics-empty{padding:26px;color:var(--text-secondary);border:1px dashed var(--border-default);border-radius:10px}.analytics-notice{padding:14px;border-left:3px solid var(--accent-primary);background:var(--border-subtle);font-size:13px}.analytics-pages,.analytics-user{display:flex;justify-content:space-between;align-items:center;gap:12px}.analytics :focus-visible{outline:2px solid var(--accent-primary);outline-offset:3px}@media(max-width:760px){.analytics-metrics{grid-template-columns:1fr}.analytics-heading{align-items:start;flex-direction:column}.analytics-filters{padding:12px}.analytics-filters>label{flex:1 1 130px;min-width:0}.analytics input:not([type=radio]){max-width:100%;min-width:0}.analytics-chart li{grid-template-columns:85px 1fr 30px}}
-</style>
+<style src="./analytics.css"></style>

@@ -11,6 +11,24 @@ const q = { from: '2026-09-20', to: '2026-09-20', environment: 'all', offset: 0,
 function event(i: Installation, employeeId?: string, extra: Partial<TrackingEvent> = {}): TrackingEvent {
   return { schemaVersion: 1, eventVersion: 1, eventId: randomUUID(), eventName: 'operation.accepted', module: 'tool-market', feature: 'tools', action: 'tool.add', occurredAt: new Date(now).toISOString(), installationId: i.installationId, runtimeId: randomUUID(), sequence: 1, initiator: 'user', interactionId: randomUUID(), operationId: randomUUID(), platform: 'darwin', appVersion: '0.1.0', environment: i.environment, properties: {}, ...(employeeId ? { employee: { source: 'welink', employeeId } } : {}), ...extra }
 }
+test('user search and sorting run before pagination and preserve aggregate counts', async () => {
+  const root=await mkdtemp(path.join(tmpdir(),'tracking-user-search-'));const db=new TrackingDatabase(root,()=>now)
+  const i:Installation={tenantId:'development',installationId:randomUUID(),environment:'development'}
+  try{
+    db.ingest(i,[event(i,'alpha'),event(i,'beta'),event(i,'beta'),event(i,'gamma'),event(i,'gamma'),event(i,'gamma')])
+    const first=db.query('users',{...q,sort:'interactions',direction:'desc',limit:1}) as any
+    const second=db.query('users',{...q,sort:'interactions',direction:'desc',limit:1,offset:1}) as any
+    assert.equal(first.rows[0].account,'gamma');assert.equal(second.rows[0].account,'beta');assert.equal(first.total,3)
+    const ascending=db.query('users',{...q,sort:'interactions',direction:'asc',limit:1}) as any
+    assert.equal(ascending.rows[0].account,'alpha')
+    const search=db.query('users',{...q,search:'BETA',sort:'interactions',direction:'desc'}) as any
+    assert.equal(search.total,1);assert.equal(search.rows[0].interactions,2)
+    assert.equal((db.query('users',{...q,search:"' OR 1=1 --"}) as any).total,0)
+    assert.equal((db.query('users',{...q,search:'%'}) as any).total,0)
+    assert.equal((db.query('rankings',{...q,search:'beta'}) as any).rows[0].account,'beta')
+    assert.equal((db.query('overview',q) as any).activeUsers,3)
+  }finally{db.close();await rm(root,{recursive:true,force:true})}
+})
 test('all environments deduplicate employee numbers across devices and platforms, including MAU outside the selected dates', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'tracking-employee-')); const db = new TrackingDatabase(root, () => now)
   const a: Installation = { tenantId: 'development', installationId: randomUUID(), environment: 'development' }

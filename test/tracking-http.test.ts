@@ -51,6 +51,11 @@ test('explicit deployment collection accepts remote production events without de
   assert.equal(overview.dau, 1); assert.equal(overview.loginUsers, 1)
   const users = await (await fetch(origin + '/api/admin/analytics/users', { headers })).json() as any
   assert.equal(users.total, 1); assert.equal(users.rows[0].account, 'qa-production')
+  const searched=await (await fetch(origin+'/api/admin/analytics/users?search=QA-PROD&sort=interactions&direction=asc&limit=1',{headers})).json() as any
+  assert.equal(searched.total,1);assert.equal(searched.rows[0].account,'qa-production')
+  for(const query of ['sort=arbitrary','direction=sideways','search='+encodeURIComponent('x'.repeat(81)),'sort=activeDays&sort=lastSeen'])assert.equal((await fetch(origin+'/api/admin/analytics/users?'+query,{headers})).status,400)
+  assert.equal((await fetch(origin+'/api/admin/analytics/rankings?sort=totalTokens',{headers})).status,400)
+  assert.equal((await fetch(origin+'/api/admin/analytics/overview?search=ignored',{headers})).status,400)
 })
 
 test('collection is controlled only by enabled regardless of the default analytics environment', async t => {
