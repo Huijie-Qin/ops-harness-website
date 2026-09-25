@@ -71,6 +71,7 @@ pnpm start
 | contentDirectory | ../.runtime/website-content | 在线文档、历史、目录配置和图片 |
 | trackingEnabled | false；仓库配置显式 true | 是否接收运营打点，与启动方式及事件环境无关 |
 | adminPasswordEnv | DSH_OPS_WEBSITE_ADMIN_PASSWORD | 注入管理员密码的环境变量名称，配置中不保存密码 |
+| cloud | `{ "enabled": false }` | 云端定时任务控制面与编排器；字段与示例见 [云端定时任务运维手册](docs/runbooks/cloud-tasks.md) |
 
 从旧配置迁移时，将原 `config/releases.json` 和 `config/website-content.json` 的字段合并到一份 `website.json`，仅保留一个 `schemaVersion`。如果新文件位置改变，应同步调整两个存储目录的相对路径，确保仍指向原数据；无需移动在线内容或发布归档。将官网进程原来的 `DSH_OPS_RELEASE_CONFIG` / `DSH_OPS_WEBSITE_CONTENT_CONFIG` 替换为 `DSH_OPS_WEBSITE_CONFIG` 后重启。只设置旧变量时服务和 CLI 会提示迁移并停止，不会静默改用默认目录。密码环境变量保持原名称。配置修改需要重启服务才能生效。
 
@@ -138,6 +139,11 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | GET/POST /api/admin/knowledge | 知识库目录（含下架条目） / 新建条目 |
 | PUT/DELETE /api/admin/knowledge/:id | 修改、删除知识库条目 |
 | POST/DELETE /api/admin/knowledge/skill?name=... | 上传、移除全部知识库共用的配套技能文件；上传使用 X-Revision |
+| GET/POST /api/admin/cloud/tokens | 云端任务个人访问令牌列表（只含 hash 前缀）/ 按工号签发，明文只返回一次 |
+| DELETE /api/admin/cloud/tokens/:hashPrefix | 吊销令牌 |
+| GET /api/admin/cloud/instances | 每用户云端实例状态、心跳与版本 |
+| POST /api/admin/cloud/instances/:employeeId/stop | 停止实例并吊销其执行器令牌 |
+| GET /api/admin/cloud/runs?employeeId&limit | 最近的云端运行记录 |
 
 二进制上传使用 `application/octet-stream`，总超时 30 分钟，空闲超时 60 秒。最多两个并行上传；JSON 仍限制大小并使用 15 秒接收超时。生产网关需要匹配请求大小、超时，并转发原始 Host。备份时保留 `contentDirectory` 和 `releaseDirectory`。详见 [ADR 0013](docs/adr/0013-website-admin-assets-and-releases.md)。
 
@@ -159,6 +165,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 | GET /updates/archive/:version/:platform/:filename | 目录中登记的文件，支持 HEAD、单段 Range、ETag |
 | GET /api/knowledge/metrics | 已上架的指标知识库元数据目录，带 ETag 与 If-None-Match |
 | GET /api/knowledge/metrics/skill | 全部知识库共用的配套技能文件字节，ETag 为内容 SHA-256 |
+| /api/cloud/v1/* | 云端定时任务的用户接口（Bearer 用户令牌）与执行器接口（Bearer 执行器令牌），路径由 `@dsh-ops/cloud-task-contract` 的 `cloudRoutes` 定义；拒绝浏览器来源，`cloud.enabled=false` 时 503 |
 
 安装包支持管理员网页上传发布与原有 CLI 发布，复用同一个发布事务。拒绝目录遍历、非法文件名、符号链接和目录外文件；下载流在连接断开时关闭。安装包可放在官网自己的持久化磁盘，目前不接第三方对象存储/CDN。
 
@@ -235,7 +242,7 @@ pnpm check
 pnpm build
 ```
 
-运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
+运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1、tracking 0.1.0 与 cloud-task-contract 0.1.0 制品（后两者依赖 zod 4.4.3，MIT）。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
 
 Windows x64 上的真实 Desktop 更新烟测由产品仓库执行：先在官网运行 `pnpm build`，再在产品仓库设置 `DSH_OPS_WEBSITE_PROJECT` 为官网的绝对路径并运行 `pnpm desktop:smoke:updates`。这只用于跨仓库集成验收，日常运行不需要该变量。
 
@@ -248,3 +255,9 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 运营统计环境：管理员页面通过 `/api/admin/analytics/context` 获取默认环境。`pnpm dev`（--dev）默认开发，`pnpm start` 默认生产；采集开关只由 trackingEnabled 控制；手动选择保留为当前浏览器 UI 偏好。数据均按所选环境查询，空表先核对环境、日期与版本筛选。匿名对话、Token、Skill 可查看次数；登录用户数、DAU/MAU 和排名直接按终端当前 WeLink 工号归属。
 
 运营统计支持“全部环境”，跨环境、跨平台的同一工号统一去重；页面不再提供平台筛选。没有工号的旧事件保留匿名，不补归当前登录者。
+
+## 云端定时任务
+
+官网是终端工作助手“云端定时任务”的控制面与编排器：保存云端任务定义与计划、排队并出租运行、保存结果与产物（7 天）、按工号签发个人访问令牌，并按需拉起/停止每用户一个的隔离云端实例（生产为 Docker 容器，开发联调为本机进程）。官网进程本身不在进程内运行 DSH；实例内的执行器插件只出站：心跳上报可用专家/技能目录、领取运行、无人值守执行、上传产物、上报完成。协议由产品仓库 `packages/shared/cloud-task-contract` 维护，官网使用 vendor 中的精确制品（见 [vendor/README.md](vendor/README.md)）。
+
+配置 `cloud` 节（默认关闭）、令牌签发、Docker/进程后端、目录布局与故障排查见 [云端定时任务运维手册](docs/runbooks/cloud-tasks.md)；决策与边界见 [ADR 0021](docs/adr/0021-cloud-task-execution.md)。管理员 `/admin` 的“云端任务”页签提供令牌签发（明文只显示一次）、令牌吊销、实例列表与停止、最近运行。

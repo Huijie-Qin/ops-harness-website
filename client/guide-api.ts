@@ -18,6 +18,8 @@ const messages: Record<string, string> = {
   LOGIN_BUSY: '当前登录请求较多，请稍后重试。',
   CONTENT_SYNC_FAILED: '同步未完成，请检查运行目录中的同步备份与记录，再继续操作。', CONTENT_SYNC_REVIEW: '上次同步尚未完成核对，请先检查运行目录中的 content-sync-review.json 和备份。', CONTENT_SYNC_UNAVAILABLE: '当前部署未提供源码同步，请在官网源码项目中启动服务。',
   REVISION_CONFLICT: '内容已被其他人更新。当前修改已保留，请与最新版本核对后重试。', CONTENT_BUSY: '其他编辑正在保存，请稍后重试。',
+  CLOUD_NOT_ENABLED: '云端任务尚未启用，请在官网配置中开启 cloud.enabled 后重启服务。', NOT_FOUND: '记录不存在或已被删除，请刷新后重试。',
+  TASK_RUNNING: '该任务有正在执行的运行，请先取消后再操作。', QUEUE_FULL: '排队数量已达上限，请稍后再试。',
   CHAPTER_NOT_FOUND: '章节不存在或已移至回收站。', CHAPTER_TOO_LARGE: '单章内容不能超过 128 KiB，请拆分章节。', CHAPTER_LIMIT: '章节数量已达到 200 个，请联系维护人员整理。',
   INVALID_CHAPTER: '请检查标题、分组、排序与正文是否完整，章节标识只能使用小写字母、数字和连字符。', INVALID_CHAPTER_ID: '章节标识格式不正确。',
   CONTENT_UNAVAILABLE: '帮助文档暂时无法读取，请稍后重试。', INVALID_REQUEST: '提交的内容不完整，请检查后重试。',

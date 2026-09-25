@@ -6,5 +6,8 @@
   "releaseDirectory": "../.runtime/website-releases",
   "contentDirectory": "../.runtime/website-content",
   "trackingEnabled": true,
-  "adminPasswordEnv": "DSH_OPS_WEBSITE_ADMIN_PASSWORD"
+  "adminPasswordEnv": "DSH_OPS_WEBSITE_ADMIN_PASSWORD",
+  "cloud": {
+    "enabled": false
+  }
 }

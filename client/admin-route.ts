@@ -7,6 +7,7 @@ export const adminSections = [
   { id: 'media', label: '图片库', icon: 'grid' },
   { id: 'knowledge', label: '知识库', icon: 'book' },
   { id: 'analytics', label: '运营统计', icon: 'windows' },
+  { id: 'cloud', label: '云端任务', icon: 'clock' },
 ] as const
 export const analyticsViews = [
   { id: 'overview', label: '总览' }, { id: 'users', label: '用户明细' },

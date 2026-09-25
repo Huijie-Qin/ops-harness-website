@@ -14,6 +14,7 @@ import { createGuideHandler } from './guide-http.js'
 import { TrackingStore } from './tracking/store.js'
 import { createTrackingHandlers } from './tracking/http.js'
 import { ContentSync } from './content-sync.js'
+import { createCloudHandlers, createCloudRuntime } from './cloud/index.js'
 
 const config = await loadConfig()
 const dev = process.argv.includes('--dev')
@@ -28,11 +29,19 @@ const knowledge = new KnowledgeStore(config.contentDirectory)
 const analytics = new TrackingStore(config.analyticsDirectory)
 const tracking = createTrackingHandlers(analytics, { enabled: config.trackingEnabled, defaultEnvironment: dev ? 'development' : 'production' })
 const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge)
-const maintenance = setInterval(() => void analytics.maintain().catch(() => {}), 3600000)
+// The cloud control plane only orchestrates per-user instances; the website process itself never runs DSH.
+const cloudLog = (line: string) => console.log(`[cloud] ${line}`)
+const cloud = config.cloud.enabled ? await createCloudRuntime(config, { log: cloudLog }) : undefined
+const cloudHandlers = createCloudHandlers(cloud, { executorPollMs: config.cloud.executorPollMs, log: cloudLog })
+const maintenance = setInterval(() => {
+  void analytics.maintain().catch(() => {})
+  void cloud?.maintain().catch(error => console.error('[cloud] maintenance failed:', error instanceof Error ? error.name : 'UnknownError'))
+}, 3600000)
 maintenance.unref()
 await analytics.maintain()
-const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: async (...args) => await tracking.admin(...args) || await contentAdmin(...args) })
-const guide: typeof guideApi = async (req, res, url) => await tracking.collect(req, res, url) || await media.serve(req, res, url) || await guideApi(req, res, url)
+await cloud?.maintain()
+const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: async (...args) => await cloudHandlers.admin(...args) || await tracking.admin(...args) || await contentAdmin(...args) })
+const guide: typeof guideApi = async (req, res, url) => await cloudHandlers.api(req, res, url) || await tracking.collect(req, res, url) || await media.serve(req, res, url) || await guideApi(req, res, url)
 const server = createServer()
 const vite = dev ? await (await import('vite')).createServer({
   server: { middlewareMode: true, hmr: { server } }, appType: 'spa',
@@ -54,6 +63,8 @@ server.listen(config.port, config.host, () => {
   console.log(`Public website URL: ${config.websiteUrl}`)
   console.log(`Release directory: ${config.releaseDirectory}`)
   console.log(`[tracking] collection=${tracking.configured ? 'enabled' : 'disabled'} scope=host authentication=none endpoint=/api/tracking/v1/events:batch`)
+  console.log(`[cloud] tasks=${cloud ? 'enabled' : 'disabled'}${cloud ? ` orchestrator=${config.cloud.orchestrator} directory=${config.cloud.directory}` : ''} endpoint=/api/cloud/v1`)
+  cloud?.scheduler.start()
 })
 let closing = false
 async function close() {
@@ -62,6 +73,7 @@ async function close() {
   const deadline = setTimeout(() => { server.closeAllConnections(); process.exit(1) }, 5000)
   deadline.unref()
   clearInterval(maintenance)
+  await cloud?.close().catch(error => console.error('[cloud] close failed:', error instanceof Error ? error.name : 'UnknownError'))
   await analytics.close()
   await vite?.close()
   server.close(() => { clearTimeout(deadline) })

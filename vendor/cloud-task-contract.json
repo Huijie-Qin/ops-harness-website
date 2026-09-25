@@ -1,0 +1,18 @@
+{
+  "name": "@dsh-ops/cloud-task-contract",
+  "version": "0.1.0",
+  "sourceRepository": "ops-harness (worktree cloud-workspace-task-execution-123920)",
+  "sourceCommit": "ed77d09874318105640b206bb9c63ec9caf59363",
+  "sourceWorkingTree": true,
+  "sourcePath": "packages/shared/cloud-task-contract",
+  "artifact": "dsh-ops-cloud-task-contract-0.1.0-e65fa56b54a2.tgz",
+  "sha256": "e65fa56b54a2bae5e1c43948ec2714ee9a8717c4b5149c96641c7d0d54e88dff",
+  "sourceSha256": {
+    "package.json": "d042a1d9870367f15c7fe8e94084b14302c748c959b675f46544cc56582aa53a",
+    "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad",
+    "README.md": "ac8a2b9a69445bba36b3040ad3eb19ba8dd59ee12172a771763cb72e6f9e9ffe",
+    "src/index.ts": "57af92dccf07e0be7fdebce88da2dc6ee51e3b31fda755f425811859c8aef91c"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "contractVersion": 1
+}
