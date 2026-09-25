@@ -1,4 +1,5 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createWriteStream, existsSync } from 'node:fs'
 import { mkdir, readFile } from 'node:fs/promises'
@@ -9,6 +10,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { InstanceState } from './types.js'
 import { describeFailure } from './errors.js'
+import { instanceEmployeeId } from './identity.js'
+import { dockerSandboxHostConfig, type DockerSandbox } from './docker-sandbox.js'
 
 export type InstanceEnvironment = Record<string, string>
 /**
@@ -26,8 +29,9 @@ export interface Orchestrator {
   /** Website shutdown hook. */
   close(): Promise<void>
 }
-export const containerName = (employeeId: string) => `dsh-ops-cloud-${employeeId}`
-export const instanceHome = (directory: string, employeeId: string) => path.join(directory, 'instances', employeeId, 'home')
+export const containerName = (employeeId: string) => `dsh-ops-cloud-${instanceEmployeeId(employeeId)}`
+export const instanceHome = (directory: string, employeeId: string) => path.join(directory, 'instances', instanceEmployeeId(employeeId), 'home')
+export const instanceNetwork = (directory: string, employeeId: string) => `dsh-ops-cloud-net-${createHash('sha256').update(path.resolve(directory)).digest('hex').slice(0, 12)}-${instanceEmployeeId(employeeId)}`
 
 /** Strip credentials from instance output before it reaches `last_error` or the instance log. */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
@@ -39,7 +43,7 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
 }
 
 // ── Docker Engine API over a unix socket / Windows named pipe ─────────────
-export type DockerOptions = { socketPath: string; image: string; memoryMb: number; cpus: number; network: string; instancePort: number; directory: string; requestTimeoutMs?: number }
+export type DockerOptions = { socketPath: string; image: string; memoryMb: number; cpus: number; network: string; instancePort: number; directory: string; user?: string | undefined; extraHosts?: string[]; sandbox?: DockerSandbox; requestTimeoutMs?: number }
 export class DockerError extends Error { constructor(public status: number, message: string) { super(message) } }
 type DockerResponse = { status: number; body: unknown }
 
@@ -73,44 +77,88 @@ export class DockerOrchestrator implements Orchestrator {
     const body = response.body as { message?: unknown } | string | undefined
     return typeof body === 'object' && body && typeof body.message === 'string' ? body.message : typeof body === 'string' ? body : `docker status ${response.status}`
   }
+  private networkLabels(employeeId: string) {
+    return { 'dsh-ops.cloud.employee': employeeId, 'dsh-ops.cloud.role': 'network', 'dsh-ops.cloud.owner': createHash('sha256').update(path.resolve(this.options.directory)).digest('hex') }
+  }
+  private async network(employeeId: string, signal?: AbortSignal) {
+    const name = instanceNetwork(this.options.directory, employeeId)
+    const response = await this.request('GET', `/networks/${encodeURIComponent(name)}`, undefined, undefined, signal)
+    if (response.status === 404) return undefined
+    if (response.status !== 200) throw new DockerError(response.status, DockerOrchestrator.message(response))
+    const info = response.body as { Id: string; Driver: string; Labels?: Record<string, string>; Containers?: Record<string, unknown>; Options?: Record<string, string> }
+    if (info.Driver !== 'bridge' || Object.entries(this.networkLabels(employeeId)).some(([key, value]) => info.Labels?.[key] !== value)) throw new DockerError(409, `network ${name} belongs to another website or employee`)
+    if (info.Options?.['com.docker.network.bridge.enable_icc'] !== 'false') throw new DockerError(409, `network ${name} is missing container isolation`)
+    return info
+  }
+  private async ensureNetwork(employeeId: string, signal?: AbortSignal): Promise<string> {
+    // A named deployment network is managed by its operator. The default bridge gets a
+    // separate network per user, so another tenant has no route to this container.
+    if (this.options.network !== 'bridge') return this.options.network
+    const name = instanceNetwork(this.options.directory, employeeId)
+    let existing = await this.network(employeeId, signal)
+    if (!existing) {
+      const created = await this.request('POST', '/networks/create', { Name: name, Driver: 'bridge', CheckDuplicate: true, Labels: this.networkLabels(employeeId), Options: { 'com.docker.network.bridge.enable_icc': 'false' } }, undefined, signal)
+      if (created.status !== 201 && created.status !== 409) throw new DockerError(created.status, DockerOrchestrator.message(created))
+      existing = await this.network(employeeId, signal)
+      if (!existing) throw new DockerError(502, 'created instance network was not found')
+    }
+    if (Object.keys(existing.Containers ?? {}).length) throw new DockerError(409, `network ${name} already has an attached container`)
+    return name
+  }
+  private async removeNetwork(employeeId: string) {
+    if (this.options.network !== 'bridge') return
+    const network = await this.network(employeeId)
+    if (!network) return
+    if (Object.keys(network.Containers ?? {}).length) throw new DockerError(409, 'instance network still has attached containers')
+    const removed = await this.request('DELETE', `/networks/${encodeURIComponent(network.Id)}`)
+    if (removed.status !== 204 && removed.status !== 404) throw new DockerError(removed.status, DockerOrchestrator.message(removed))
+  }
   private async container(employeeId: string, signal?: AbortSignal) {
     const response = await this.request('GET', `/containers/${encodeURIComponent(containerName(employeeId))}/json`, undefined, undefined, signal)
     if (response.status === 404) return undefined
     if (response.status !== 200) throw new DockerError(response.status, DockerOrchestrator.message(response))
-    const info = response.body as { Id: string; State?: { Status?: string; Running?: boolean; ExitCode?: number } }
+    const info = response.body as { Id: string; Config?: { Labels?: Record<string, string> }; HostConfig?: { Binds?: string[] }; State?: { Status?: string; Running?: boolean; ExitCode?: number } }
+    const expectedHome = `${instanceHome(this.options.directory, employeeId)}:/data/home`
+    if (info.Config?.Labels?.['dsh-ops.cloud.employee'] !== employeeId || info.Config.Labels['dsh-ops.cloud.role'] !== 'instance' || !info.HostConfig?.Binds?.includes(expectedHome)) {
+      throw new DockerError(409, `container ${containerName(employeeId)} belongs to another website or data directory`)
+    }
     return { id: info.Id, status: String(info.State?.Status ?? ''), running: Boolean(info.State?.Running), exitCode: Number(info.State?.ExitCode ?? 0) }
   }
   private static state(status: string, running: boolean): InstanceState {
     if (running || status === 'running') return 'running'
-    if (status === 'restarting' || status === 'created') return 'starting'
+    if (status === 'restarting') return 'starting'
     if (status === 'removing') return 'stopping'
     // We remove the containers we stop ourselves, so one that is still around but not running died on its own.
-    if (status === 'exited' || status === 'dead') return 'error'
+    if (status === 'exited' || status === 'dead' || status === 'created') return 'error'
     return 'stopped'
   }
   async inspect(employeeId: string): Promise<OrchestratorState> {
     const container = await this.container(employeeId)
     if (!container) return { state: 'stopped' }
     const state = DockerOrchestrator.state(container.status, container.running)
-    return { state, backendRef: container.id, ...(state === 'error' ? { error: `container ${container.status} with exit code ${container.exitCode}` } : {}) }
+    return { state, backendRef: container.id, ...(state === 'error' ? { error: container.status === 'created' ? 'container was created but never started' : `container ${container.status} with exit code ${container.exitCode}` } : {}) }
   }
   async ensureRunning(employeeId: string, env: InstanceEnvironment, signal?: AbortSignal): Promise<OrchestratorState> {
     const existing = await this.container(employeeId, signal)
     if (existing?.running) return { state: 'running', backendRef: existing.id }
     // A stopped container still carries the previous executor token in its env: recreate instead of restarting.
     if (existing) {
-      const removed = await this.request('DELETE', `/containers/${existing.id}?force=true`, undefined, undefined, signal)
+      const removed = await this.request('DELETE', `/containers/${existing.id}?force=true&v=true`, undefined, undefined, signal)
       if (removed.status !== 204 && removed.status !== 404) throw new DockerError(removed.status, DockerOrchestrator.message(removed))
     }
     const home = instanceHome(this.options.directory, employeeId)
     await mkdir(home, { recursive: true })
+    const networkMode = await this.ensureNetwork(employeeId, signal)
+    const user = this.options.user ?? (this.options.sandbox === 'bubblewrap' ? '1000:1000' : undefined)
     const created = await this.request('POST', `/containers/create?name=${encodeURIComponent(containerName(employeeId))}`, {
       Image: this.options.image,
-      Env: Object.entries({ ...env, DSH_HOME: '/data/home', DSH_OPS_CLOUD_INSTANCE_PORT: String(this.options.instancePort) }).map(([key, value]) => `${key}=${value}`),
+      ...(user ? { User: user } : {}),
+      Env: Object.entries({ ...env, HOME: '/data/home', DSH_HOME: '/data/home', DSH_OPS_CLOUD_INSTANCE_PORT: String(this.options.instancePort) }).map(([key, value]) => `${key}=${value}`),
       Labels: { 'dsh-ops.cloud.employee': employeeId, 'dsh-ops.cloud.role': 'instance' },
       HostConfig: {
+        ...dockerSandboxHostConfig(this.options.sandbox),
         Binds: [`${home}:/data/home`], Memory: this.options.memoryMb * 1024 * 1024, NanoCpus: Math.round(this.options.cpus * 1e9),
-        NetworkMode: this.options.network, RestartPolicy: { Name: 'no' }, LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } },
+        NetworkMode: networkMode, ExtraHosts: this.options.extraHosts ?? [], RestartPolicy: { Name: 'no' }, LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } },
       },
     }, undefined, signal)
     if (created.status === 404) throw new DockerError(404, `image ${this.options.image} not found`)
@@ -122,16 +170,19 @@ export class DockerOrchestrator implements Orchestrator {
   }
   /** Graceful stop, kill on failure, then remove: a deliberately stopped instance reads back as absent, not as a crash. */
   async stop(employeeId: string): Promise<void> {
+    // Check ownership before a destructive Docker operation, including after a website config change.
+    if (!await this.container(employeeId)) { await this.removeNetwork(employeeId); return }
     const name = encodeURIComponent(containerName(employeeId))
     let stopped: DockerResponse | undefined
     try { stopped = await this.request('POST', `/containers/${name}/stop?t=10`, undefined, 25_000) } catch { stopped = undefined }
-    if (stopped?.status === 404) return
+    if (stopped?.status === 404) { await this.removeNetwork(employeeId); return }
     if (!stopped || ![204, 304].includes(stopped.status)) {
       const killed = await this.request('POST', `/containers/${name}/kill`)
       if (![204, 304, 404, 409].includes(killed.status)) throw new DockerError(killed.status, DockerOrchestrator.message(killed))
     }
-    const removed = await this.request('DELETE', `/containers/${name}?force=true`)
+    const removed = await this.request('DELETE', `/containers/${name}?force=true&v=true`)
     if (![204, 404].includes(removed.status)) throw new DockerError(removed.status, DockerOrchestrator.message(removed))
+    await this.removeNetwork(employeeId)
   }
   async close() { /* containers outlive the website process */ }
 }

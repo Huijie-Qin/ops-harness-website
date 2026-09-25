@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, access, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { ProcessOrchestrator } from '../server/cloud/orchestrator.js'
@@ -76,10 +76,10 @@ test('process orchestrator bootstraps a home once, launches DSH with the instanc
   const pid = Number(launched.backendRef)
   assert.ok(alive(pid))
   const synced = JSON.parse(await readFile(path.join(home, 'sync-content.json'), 'utf8')) as { cwd: string }
-  assert.equal(synced.cwd, repo)
+  assert.equal(synced.cwd, await realpath(repo))
   const added = JSON.parse(await readFile(path.join(home, 'plugin-add.json'), 'utf8')) as { args: string[]; cwd: string }
   assert.deepEqual(added.args, ['plugin', '--profile', 'web', 'add', '--allow-build=node-pty', path.join(repo, 'packages', 'a'), 'dsh-better-sidebar@0.19.1'])
-  assert.equal(added.cwd, repo)
+  assert.equal(added.cwd, await realpath(repo))
   const ready = await orchestrator.waitUntilReady('w7', 20_000)
   assert.equal(ready.state, 'running')
   assert.equal(ready.launchUrl, `http://127.0.0.1:${launched.port}/?launch=fake-token`)

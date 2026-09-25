@@ -7,3 +7,4 @@ try {
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Invalid content/media directory')
   await cp('content/media', 'dist/content/media', { recursive: true, dereference: false })
 } catch (error) { if (error.code !== 'ENOENT') throw error }
+await cp(new URL('../docs/third-party/', import.meta.url), 'dist/third-party', { recursive: true, dereference: false })

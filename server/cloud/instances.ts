@@ -8,6 +8,8 @@ export type InstanceManagerOptions = {
   instanceWebsiteUrl: string
   /** Name of the website process environment variable holding the organisation model key. */
   modelApiKeyEnv: string
+  modelBaseUrl?: string
+  modelName?: string
   now?: () => number
   log?: ((line: string) => void) | undefined
   /** Do not retry a failed launch more often than this. */
@@ -42,6 +44,8 @@ export class InstanceManager {
       DSH_OPS_CLOUD_EXECUTOR_TOKEN: executorToken,
       DSH_OPS_CLOUD_INSTANCE_ID: employeeId,
       ...(modelKey ? { DSH_OPS_DEFAULT_MODEL_API_KEY: modelKey } : {}),
+      ...(this.options.modelBaseUrl ? { DSH_OPS_CLOUD_MODEL_BASE_URL: this.options.modelBaseUrl } : {}),
+      ...(this.options.modelName ? { DSH_OPS_CLOUD_MODEL_NAME: this.options.modelName } : {}),
       DSH_PERMISSION_MODE: 'workspace-write',
       DSH_TELEMETRY_DISABLED: '1',
     }
@@ -52,7 +56,10 @@ export class InstanceManager {
   ensureRunning(employeeId: string): Promise<InstanceStatus> {
     const pending = this.inflight.get(employeeId)
     if (pending) return pending
-    const work = this.ensure(employeeId).finally(() => this.inflight.delete(employeeId))
+    return this.track(employeeId, this.ensure(employeeId))
+  }
+  private track(employeeId: string, operation: Promise<InstanceStatus>) {
+    const work = operation.finally(() => { if (this.inflight.get(employeeId) === work) this.inflight.delete(employeeId) })
     this.inflight.set(employeeId, work)
     return work
   }
@@ -106,7 +113,13 @@ export class InstanceManager {
     this.db.updateInstance(employeeId, { state: 'error', lastHeartbeatAt: null, lastError: message })
     this.options.log?.(`instance ${employeeId} failed (${count} in a row, backing off): ${firstLine(message)}`)
   }
-  async stop(employeeId: string): Promise<InstanceStatus> {
+  stop(employeeId: string): Promise<InstanceStatus> {
+    // A launch may still be creating the container. Stop it only after that launch settles,
+    // and keep subsequent wakeups deduplicated until the stop has revoked its token.
+    const pending = this.inflight.get(employeeId)
+    return this.track(employeeId, (pending ?? Promise.resolve()).then(() => this.stopInstance(employeeId)))
+  }
+  private async stopInstance(employeeId: string): Promise<InstanceStatus> {
     this.db.updateInstance(employeeId, { state: 'stopping' })
     this.failures.delete(employeeId)
     try {
@@ -120,10 +133,14 @@ export class InstanceManager {
   }
   /** Re-read the backend state without launching: crashes are recorded even when no run is waiting. */
   async refresh(employeeId: string): Promise<InstanceStatus> {
+    const pending = this.inflight.get(employeeId)
+    if (pending) return pending
     const record = this.db.instance(employeeId)
     if (!record || record.state === 'stopped' || record.state === 'error') return this.db.instanceStatus(employeeId)
     try { this.reconcile(employeeId, record, await this.orchestrator.inspect(employeeId)) }
     catch (error) { this.options.log?.(`instance ${employeeId} inspect failed: ${describeFailure(error)}`) }
     return this.db.instanceStatus(employeeId)
   }
+  /** Requests can initiate a wakeup outside the scheduler; let those finish before closing the database. */
+  async settle() { await Promise.allSettled(this.inflight.values()) }
 }

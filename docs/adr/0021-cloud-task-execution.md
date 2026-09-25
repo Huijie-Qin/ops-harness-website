@@ -23,13 +23,39 @@
 
 ## 后果
 
+### 2026-09-25 端到端验证修正
+
+- 首次创建任务之前需要专家目录，因此已认证用户第一次读取空 `/catalog` 可幂等唤醒实例；有历史目录时只读缓存并标记 stale，保留空闲休眠。
+- 官网配置显式提供成对的模型 `modelBaseUrl` / `modelName`，密钥仍只从 `modelApiKeyEnv` 读取并注入；模型路由不再靠隐式容器默认值决定。Docker 可配置非 root 数字 `user`，由部署环境保证 bind home 权限，应用不自动 chown 已有数据。
+- 启动和停止按用户串行；同名 Docker 容器必须匹配员工、角色与 home 挂载才允许接管或停止；`created` 遗留容器作为启动失败进入退避。保留原容器名，跨官网同名冲突显式失败。
+- 租约到期即失效，迟到心跳不得复活；已申请取消的失联运行直接结束，不重排。协议目前没有每次领取独立的 attempt ID，不能承诺跨进程旧请求的严格 fencing；执行器同时实施本地租约截止和中止，后续若需要严格幂等外部副作用，应扩展协议并升级两侧。
+
+### 2026-09-25 Docker 内 bubblewrap 兼容模式
+
+真实 Docker 5.15 内核的联调探针中，DSH 原生沙箱不可用时拒绝执行 Bash；安装 bubblewrap 后，Docker 默认 seccomp 与 `/proc` mount 约束仍阻止其建立内部沙箱。因此增加显式的 `cloud.docker.sandbox: native | bubblewrap`，默认 `native` 保留现有 Docker 默认与 DSH 失败即拒绝行为，只有部署人员主动选择才启用兼容配置。
+
+`bubblewrap` 使用受控的 Moby v24.0.2 默认 seccomp 快照，仅追加 `clone`、`unshare`、`mount`、`umount2`、`pivot_root` 五项 allow（探针逐一移除均不能启动）；来源与 SHA-256 固定在 `server/cloud/docker-sandbox.ts`，完整 Apache-2.0 许可证及来源登记随源码和生产构建分发。Docker 创建请求同时固定 `CapDrop: [ALL]`、`Privileged: false`、`no-new-privileges=true`、只读 rootfs、`/tmp` 的 128 MiB tmpfs（`rw,exec,nosuid,nodev,size=128m,mode=1777`）；移除 Docker 默认 `/proc/*` masked/readonly 项，保留 `MaskedPaths: [/sys/firmware]`。该模式默认显式使用 `1000:1000`，也可配置其他非 root `docker.user`，不依赖任意镜像的默认 USER。不接收任意 seccomp 文件、内联规则或 `unconfined`。
+
+`/tmp` 显式允许 `exec` 是 DSH 官方原生模块加载器的兼容要求：`node-addon-native-custom-loader` 将已校验的预编译模块复制到缓存，再由 `dlopen` 加载；Docker tmpfs 默认 `noexec` 会让映射失败，并使依赖该加载器的产品插件无法载入。真实同镜像探针仅切换此项即从加载失败恢复；保留 `nosuid`、`nodev`、容量限制与全部容器权限约束，不修改 `node_modules` 或引入私有缓存开关。DSH 内部 bubblewrap 仍为任务建立独立沙箱。
+
+风险权衡：为非特权用户命名空间开放上述 syscall，并取消 Docker 对 `/proc` 的额外 mount 保护，会扩大容器内可用的内核接口；外层非 root、无 capabilities、禁止提权和只读 rootfs 限制 proc 写入，内层 bubblewrap 继续隔离子进程与文件系统。该设置不等价于每任务网络隔离，外部出站 ACL 仍由 Docker 网络和网关负责。镜像必须安装 bubblewrap；不支持时仍由 DSH 拒绝执行，不自动降级成无沙箱。升级内核、Docker、Moby profile 或 DSH 时须重跑允许工作区写入、拒绝工作区外写入的真实探针与完整任务链路。
+
+### 默认 Docker 网络的租户隔离
+
+真实双容器探针证明，共用默认 bridge 时即使没有发布端口，也能通过容器 IP 互相访问。因此 `cloud.docker.network=bridge` 现在表示官网管理的每用户独立 bridge 网络，名称包含 cloud.directory 的稳定 namespace 与规范化工号；使用员工、角色和目录 hash 标签校验归属，禁止接管其他部署的同名网络，且创建新容器前网络必须没有其他容器。网络设置 `enable_icc=false`，停止并删除容器后仅回收空的自有网络。官网重启不会删除仍运行实例的网络。
+
+显式配置其他网络名称时，该网络由部署者管理；官网不创建/删除它，跨租户 ACL 由网络管理员保证。该修复保留容器的互联网出站，不提供域名白名单、模型出口代理或磁盘配额。已有共享 bridge 上的运行保持原状态，须有序停止并重建才能启用新隔离；不得将它们标记为已完成隔离验收。网络数量受 Docker daemon 的地址池约束，生产部署需按同时在线实例数配置并验收。删除容器时传 `v=true` 回收历史镜像声明的匿名卷，用户 home 仍为独立 bind mount，不被删除。
+
 - 官网多了一个有状态的后台循环（计划器）与外部进程/容器依赖；部署时要给官网进程 Docker socket 访问权（或专用的 Docker 主机），并把 `cloud.directory` 放在持久盘。官网重启后 Docker 实例照常运行并被重新识别；进程后端的实例随官网进程退出而结束，重启后数据库中的实例状态被校正为 stopped。
 - 令牌是网站的第一个面向终端用户的凭证；后台的令牌页只显示 hash 前缀，吊销即时生效。SSO 替换令牌只需换鉴权层，数据模型不变。
 - 实例内的 DSH 只监听容器回环；进程后端在开发机上监听本机端口，`launchUrl` 只对进程后端在管理接口中返回。
-- 尚未实现：官网层的出站白名单与 Landlock/bwrap 等容器内加固（属于镜像与宿主机配置）、按工号计量模型用量、多官网实例共享同一 SQLite。
+- 尚未实现：官网层的出站白名单、按工号计量模型用量、多官网实例共享同一 SQLite。容器内沙箱依赖部署环境；显式 bubblewrap 兼容模式的边界见上文。
 
 ## 验证
 
 - `pnpm check`：新增 `test/cloud-*.test.ts` 覆盖令牌鉴权与吊销、浏览器来源拒绝、任务 CRUD 与 revision 冲突、计划器（假时钟：到期入队、追赶、队列上限、租约两次回退第三次失败、24 小时过期、空闲停机与令牌吊销、编排失败退避、7 天清理）、执行器领取/进度/产物往返（sha256 不匹配拒绝、完成时产物不一致拒绝）/完成、Docker 假 socket（创建/启动/复用/重建/停止/kill/缺镜像）、进程编排器（假产品仓库与假 dsh 入口：初始化、启动参数与环境、就绪判定、日志不含令牌、进程树清理）、时区/月末/DST 计划计算。
 - `pnpm build`。
-- 真实 Docker 主机上的镜像构建、容器拉起与完整执行链路需要 Linux 环境，本机（Windows ARM64 VM，无 Docker）无法完成，见 runbook 的"待验证"。
+- 初版历史记录：原 Windows ARM64 VM 没有 Docker，仅完成假 Engine API 等自动化验证，未完成真实镜像构建或容器链路。
+- 2026-09-25 本轮更新：在 macOS 的 Docker 24.0.2（Linux 5.15.49、aarch64）完成真实镜像构建、当前编排器创建与删除实例、bubblewrap 容器约束、每用户独立 bridge 的跨租户直接 IP HTTP 拒绝、自身 loopback 访问和 `host-gateway` 宿主 HTTP 访问验证。
+- 真实 DeepSeek 模型的 Bash 任务在 6.371 秒完成，已有实际 `tool/call` 与结果记录，并下载产物断言工作区可写、既存工作区外目录不可写、命令子进程环境不含模型 Key 或执行器令牌。使用确定性模拟模型另行通过 UI 运行中取消、排队取消、60.049 秒超时、官网短暂重启后原容器内同一运行续跑、本地 Runtime 关闭后的单次计划执行；模拟结果不冒充真实模型工具调用。
+- 最后补充专家必要工具可用性判断后的产品最终镜像 `sha256:8293475f929e846652ef54f0650875f4dd02bb12d7a341e68c95943af28f6884` 已重建并重复通过真实 Bash 验收：运行 `cr_650d49a81d8a3567323a1a13a7a706e7` 耗时 3.958 秒，新会话记录包含 Bash `tool/call` 与 `tool/result` 验收标记，下载文件的工作区可写、外目录拒绝、模型 Key 与执行器令牌不可见四项断言再次通过。证据见产品仓库的 [Docker 端到端验收报告](../../../ops-harness/docs/qa/cloud-tasks-docker-e2e-2026-09-25.md)（本地并列检出路径）。此结果不替代生产 Linux/x64 主机与 bind mount 权限验收；出站白名单、模型出口代理和持久盘配额仍未实现或验证。

@@ -73,6 +73,11 @@ function stop(instance: InstanceRecord) {
 }
 function accept() { const action = confirmation.value?.action; confirmation.value = undefined; action?.() }
 function when(value: string | null | undefined) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
+function tokenStatus(token: TokenRecord) {
+  if (token.revokedAt) return { state: 'revoked', label: '已吊销' }
+  if (token.expiresAt && Date.parse(token.expiresAt) <= Date.now()) return { state: 'expired', label: '已过期' }
+  return { state: 'active', label: '有效' }
+}
 function heartbeat(instance: InstanceRecord) {
   if (!instance.lastHeartbeatAt) return '尚无心跳'
   const age = Date.now() - Date.parse(instance.lastHeartbeatAt)
@@ -109,7 +114,7 @@ onBeforeUnmount(() => { lifetime.abort(); emit('busy', false) })
         <div class="cloud-block-heading"><h3 id="cloud-tokens-heading">令牌<span>（{{ visibleTokens.length }}）</span></h3><label class="check-label"><input v-model="showRevoked" type="checkbox" />显示已吊销</label></div>
         <div v-if="visibleTokens.length" class="cloud-table" role="region" aria-label="令牌列表，可横向滚动" tabindex="0"><table>
           <thead><tr><th scope="col">工号</th><th scope="col">类型</th><th scope="col">备注</th><th scope="col">前缀</th><th scope="col">创建</th><th scope="col">到期</th><th scope="col">最近使用</th><th scope="col">状态</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
-          <tbody><tr v-for="token in visibleTokens" :key="token.hashPrefix"><td><strong>{{ token.employeeId }}</strong></td><td>{{ token.kind === 'user' ? '个人访问' : '执行器' }}</td><td class="cloud-wrap">{{ token.label || '—' }}</td><td><code>{{ token.hashPrefix }}</code></td><td>{{ when(token.createdAt) }}</td><td>{{ token.expiresAt ? when(token.expiresAt) : '长期' }}</td><td>{{ when(token.lastUsedAt) }}</td><td><span class="cloud-status" :class="token.revokedAt ? 'revoked' : 'active'">{{ token.revokedAt ? '已吊销' : '有效' }}</span></td><td><button v-if="!token.revokedAt" class="cloud-action danger" :disabled="busy" @click="revoke(token)">吊销</button></td></tr></tbody>
+          <tbody><tr v-for="token in visibleTokens" :key="token.hashPrefix"><td><strong>{{ token.employeeId }}</strong></td><td>{{ token.kind === 'user' ? '个人访问' : '执行器' }}</td><td class="cloud-wrap">{{ token.label || '—' }}</td><td><code>{{ token.hashPrefix }}</code></td><td>{{ when(token.createdAt) }}</td><td>{{ token.expiresAt ? when(token.expiresAt) : '长期' }}</td><td>{{ when(token.lastUsedAt) }}</td><td><span class="cloud-status" :class="tokenStatus(token).state">{{ tokenStatus(token).label }}</span></td><td><button v-if="!token.revokedAt" class="cloud-action danger" :disabled="busy" @click="revoke(token)">吊销</button></td></tr></tbody>
         </table></div>
         <p v-else-if="!loading" class="editor-help">尚未签发令牌。</p>
       </section>
@@ -119,7 +124,7 @@ onBeforeUnmount(() => { lifetime.abort(); emit('busy', false) })
           <thead><tr><th scope="col">工号</th><th scope="col">状态</th><th scope="col">心跳</th><th scope="col">版本</th><th scope="col">最近活动</th><th scope="col">说明</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
           <tbody><tr v-for="instance in instances" :key="instance.employeeId"><td><strong>{{ instance.employeeId }}</strong><small v-if="instance.backendRef">{{ instance.backend }} · {{ instance.backendRef.slice(0, 12) }}{{ instance.port ? ` · ${instance.port}` : '' }}</small></td><td><span class="cloud-status" :class="instance.state">{{ stateLabels[instance.state] ?? instance.state }}</span></td><td>{{ heartbeat(instance) }}</td><td>{{ instance.bundleVersion ? `bundle ${instance.bundleVersion}` : '—' }}<small v-if="instance.dshVersion">DSH {{ instance.dshVersion }}</small></td><td>{{ when(instance.lastActivityAt) }}</td><td class="cloud-wrap"><span v-if="instance.lastError" class="cloud-error">{{ instance.lastError }}</span><a v-else-if="instance.launchUrl" :href="instance.launchUrl" target="_blank" rel="noopener">打开实例页面 ↗</a><span v-else>{{ instance.hasCatalog ? '已上报目录' : '—' }}</span></td><td><button v-if="['starting', 'running', 'error'].includes(instance.state)" class="cloud-action danger" :disabled="busy" @click="stop(instance)">停止</button></td></tr></tbody>
         </table></div>
-        <p v-else-if="!loading" class="editor-help">还没有拉起过实例。有排队任务时计划器会自动拉起。</p>
+        <p v-else-if="!loading" class="editor-help">还没有拉起过实例。用户首次打开云端任务时会准备专家目录；之后有排队任务时会自动启动实例。</p>
       </section>
       <section class="cloud-block" aria-labelledby="cloud-runs-heading">
         <div class="cloud-block-heading"><h3 id="cloud-runs-heading">最近运行<span>（{{ runs.length }}）</span></h3><form class="cloud-run-filter" role="search" @submit.prevent="run(list)"><input v-model="runFilter" type="search" aria-label="按工号筛选运行记录" placeholder="按工号筛选" maxlength="64" /><button class="button secondary" :disabled="busy">筛选</button></form></div>

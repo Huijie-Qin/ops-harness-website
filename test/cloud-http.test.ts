@@ -48,6 +48,22 @@ async function httpFixture(t: TestContext, enabled = true) {
 }
 const error = async (response: Response) => (await response.json() as { error: string }).error
 
+test('the first catalog request wakes an empty instance, while a cached catalog preserves idle sleep', async t => {
+  const f = await httpFixture(t)
+  const { token } = await f.issue()
+  const { db, runtime, orchestrator, clock } = f.cloud!
+  assert.deepEqual(await (await f.api(cloudRoutes.catalog, token)).json(), { catalog: null, stale: true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(orchestrator.calls, [`ensure:${employee}`], 'a new user can discover experts before creating their first task')
+  const catalog = { generatedAt: new Date(clock.now()).toISOString(), defaultExpertId: 'product-default', experts: [] }
+  db.heartbeat(employee, { contractVersion: CONTRACT_VERSION, instanceId: employee, bundleVersion: '1.0.0', dshVersion: '0.1.5', catalog, runningRunIds: [] })
+  await runtime.instances.stop(employee)
+  const count = orchestrator.calls.length
+  assert.deepEqual(await (await f.api(cloudRoutes.catalog, token)).json(), { catalog, stale: true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(orchestrator.calls.length, count, 'polling cached experts must not wake a sleeping instance')
+})
+
 test('everything under /api/cloud returns CLOUD_NOT_ENABLED when the feature is off, admin endpoints too', async t => {
   const f = await httpFixture(t, false)
   const me = await f.api(cloudRoutes.me, 'a'.repeat(40))
@@ -61,6 +77,7 @@ test('user tokens are issued once in plaintext, authenticate Host requests, and 
   assert.equal((await f.api(cloudRoutes.me, undefined)).status, 401)
   assert.equal((await f.api(cloudRoutes.me, 'b'.repeat(40))).status, 401)
   assert.equal((await f.admin('/api/admin/cloud/tokens', { method: 'POST', data: { employeeId: 'Not Valid!', label: 'x' } })).status, 400)
+  for (const employeeId of ['.', '..']) assert.equal((await f.admin('/api/admin/cloud/tokens', { method: 'POST', data: { employeeId, label: 'invalid path' } })).status, 400)
   const issued = await f.issue()
   assert.match(issued.token, /^[A-Za-z0-9_-]{32,128}$/)
   assert.equal(issued.record.kind, 'user'); assert.equal(issued.record.employeeId, employee)
@@ -172,6 +189,8 @@ test('executor lifecycle: heartbeat, claim, progress, artifact round trip and co
   assert.deepEqual((await stored.json() as { run: CloudRun }).run.artifact, { size: bytes.length, sha256, fileCount: 2 })
   const inconsistent = await f.api(cloudRoutes.executorComplete(queued.id), executor, { method: 'POST', data: { status: 'succeeded', finishedAt: new Date(clock.now()).toISOString(), summary: '', errorCode: '', artifact: { size: 1, sha256, fileCount: 2 } } })
   assert.equal(inconsistent.status, 409); assert.equal(await error(inconsistent), 'ARTIFACT_MISMATCH')
+  const wrongCount = await f.api(cloudRoutes.executorComplete(queued.id), executor, { method: 'POST', data: { status: 'succeeded', finishedAt: new Date(clock.now()).toISOString(), summary: '', errorCode: '', artifact: { size: bytes.length, sha256, fileCount: 3 } } })
+  assert.equal(wrongCount.status, 409, 'completion cannot rewrite uploaded file-count metadata')
   const completion = await f.api(cloudRoutes.executorComplete(queued.id), executor, { method: 'POST', data: { status: 'succeeded', finishedAt: new Date(clock.now()).toISOString(), summary: '晨报已生成', errorCode: '', autoDecisions: 3, artifact: { size: bytes.length, sha256, fileCount: 2 } } })
   assert.equal(completion.status, 200)
   const finished = (await completion.json() as { run: CloudRun }).run

@@ -23,7 +23,10 @@ export async function createCloudRuntime(config: Pick<WebsiteConfig, 'cloud' | '
     : new ProcessOrchestrator({ ...cloud.process, directory: cloud.directory, log: options.log }))
   const instances = new InstanceManager(db, orchestrator, {
     instanceWebsiteUrl: cloud.orchestrator === 'docker' ? cloud.docker.websiteUrlForInstances ?? config.websiteUrl : config.websiteUrl,
-    modelApiKeyEnv: cloud.modelApiKeyEnv, log: options.log, ...(options.now ? { now: options.now } : {}),
+    modelApiKeyEnv: cloud.modelApiKeyEnv,
+    ...(cloud.modelBaseUrl === undefined ? {} : { modelBaseUrl: cloud.modelBaseUrl }),
+    ...(cloud.modelName === undefined ? {} : { modelName: cloud.modelName }),
+    log: options.log, ...(options.now ? { now: options.now } : {}),
   })
   const artifacts = new ArtifactStore(path.join(cloud.directory, 'artifacts'))
   await artifacts.initialize()
@@ -37,6 +40,7 @@ export async function createCloudRuntime(config: Pick<WebsiteConfig, 'cloud' | '
     },
     async close() {
       await scheduler.stop()
+      await instances.settle()
       await orchestrator.close().catch(error => options.log?.(`orchestrator close failed: ${describeFailure(error)}`))
       db.close()
     },

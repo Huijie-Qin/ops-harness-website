@@ -80,6 +80,55 @@ test('unified configuration preserves strict release and content validation', as
   await assert.rejects(loadConfig(configPath), SyntaxError)
 })
 
+test('cloud model configuration is explicit and Docker users must remain non-root', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'website-cloud-config-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const configPath = path.join(root, 'website.json')
+  const cloud = { enabled: true, modelBaseUrl: 'https://api.deepseek.com/v1/', modelName: 'deepseek-v4-flash', docker: { user: '1000:1000' } }
+  await writeFile(configPath, JSON.stringify({ ...externalConfig, cloud }))
+  const parsed = await loadConfig(configPath)
+  assert.equal(parsed.cloud.modelBaseUrl, 'https://api.deepseek.com/v1')
+  assert.equal(parsed.cloud.modelName, 'deepseek-v4-flash')
+  assert.equal(parsed.cloud.docker.user, '1000:1000')
+  for (const invalid of [
+    { ...cloud, modelName: undefined }, { ...cloud, modelBaseUrl: undefined }, { ...cloud, modelName: '  ' },
+    ...['https://key:secret@example.com/v1', 'file:///private/model', 'https://api.example.com/v1?apiKey=test', 'https://api.example.com/v1#key'].map(modelBaseUrl => ({ ...cloud, modelBaseUrl })),
+    ...['0:0', '0:1000', '1000:0', 'root', '-1:1000'].map(user => ({ ...cloud, docker: { user } })),
+  ]) {
+    await writeFile(configPath, JSON.stringify({ ...externalConfig, cloud: invalid }))
+    await assert.rejects(loadConfig(configPath))
+  }
+})
+
+test('Docker host mappings accept host-gateway or literal IPs and reject ambiguous host entries', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'website-cloud-hosts-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const configPath = path.join(root, 'website.json')
+  await writeFile(configPath, JSON.stringify(externalConfig))
+  assert.deepEqual((await loadConfig(configPath)).cloud.docker.extraHosts, [])
+  const extraHosts = ['host.docker.internal:host-gateway', 'website.internal:192.168.65.254', 'ipv6.internal:::1']
+  await writeFile(configPath, JSON.stringify({ ...externalConfig, cloud: { docker: { extraHosts } } }))
+  assert.deepEqual((await loadConfig(configPath)).cloud.docker.extraHosts, extraHosts)
+  for (const invalid of [['host'], ['host:example.com'], ['host:300.1.1.1'], ['host:127.0.0.1\ninjected:127.0.0.1'], ['bad host:127.0.0.1'], ['-host:127.0.0.1'], ['host:fe80::1%eth0'], ['host:127.0.0.1', 'HOST:127.0.0.2'], Array(33).fill('host:host-gateway')]) {
+    await writeFile(configPath, JSON.stringify({ ...externalConfig, cloud: { docker: { extraHosts: invalid } } }))
+    await assert.rejects(loadConfig(configPath))
+  }
+})
+
+test('Docker sandbox mode is explicit, defaults to native and rejects arbitrary profiles', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'website-cloud-sandbox-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const configPath = path.join(root, 'website.json')
+  await writeFile(configPath, JSON.stringify(externalConfig))
+  assert.equal((await loadConfig(configPath)).cloud.docker.sandbox, 'native')
+  await writeFile(configPath, JSON.stringify({ ...externalConfig, cloud: { docker: { sandbox: 'bubblewrap' } } }))
+  assert.equal((await loadConfig(configPath)).cloud.docker.sandbox, 'bubblewrap')
+  for (const docker of [{ sandbox: 'unconfined' }, { sandbox: 'privileged' }, { sandbox: 'bubblewrap', seccompProfile: '/tmp/anything.json' }]) {
+    await writeFile(configPath, JSON.stringify({ ...externalConfig, cloud: { docker } }))
+    await assert.rejects(loadConfig(configPath))
+  }
+})
+
 test('release CLI uses unified environment configuration and an explicit override without loading administrator credentials', async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'website-cli-config-'))
   t.after(() => rm(root, { recursive: true, force: true }))

@@ -11,6 +11,7 @@ import {
 import { CloudError } from './errors.js'
 import { nextRunAt } from './schedule.js'
 import type { InstanceStatus } from './types.js'
+import { CloudEmployeeIdSchema } from './identity.js'
 
 export type TokenKind = 'user' | 'executor'
 export type TokenRecord = { hashPrefix: string; employeeId: string; kind: TokenKind; label: string; createdAt: string; expiresAt: string | null; revokedAt: string | null; lastUsedAt: string | null }
@@ -74,6 +75,7 @@ export class CloudDatabase {
 
   // ── Tokens ─────────────────────────────────────────────────────────────
   issueToken(input: { employeeId: string; kind: TokenKind; label: string; expiresAt?: number | undefined }): { token: string; hash: string; record: TokenRecord } {
+    if (!CloudEmployeeIdSchema.safeParse(input.employeeId).success) throw new CloudError('INVALID_REQUEST', 400, 'invalid employeeId')
     const token = randomBytes(32).toString('base64url')
     const hash = sha256(token)
     const expiresAt = input.expiresAt === undefined ? null : this.iso(input.expiresAt)
@@ -86,6 +88,7 @@ export class CloudDatabase {
     const hash = sha256(token)
     const row = this.db.prepare('SELECT employee_id, kind, expires_at, revoked_at FROM cloud_tokens WHERE hash=?').get(hash)
     if (!row || row.kind !== kind || row.revoked_at !== null) return undefined
+    if (!CloudEmployeeIdSchema.safeParse(row.employee_id).success) return undefined
     if (row.expires_at !== null && Date.parse(String(row.expires_at)) <= this.now()) return undefined
     this.db.prepare('UPDATE cloud_tokens SET last_used_at=? WHERE hash=?').run(this.iso(), hash)
     return { employeeId: String(row.employee_id), hash, kind }
@@ -161,7 +164,7 @@ export class CloudDatabase {
         .run(employeeId, state, now, now, now, JSON.stringify(heartbeat.catalog), heartbeat.bundleVersion, heartbeat.dshVersion, state)
       const lease = this.iso(this.now() + CLAIM_LEASE_MS)
       for (const runId of heartbeat.runningRunIds) {
-        this.db.prepare("UPDATE cloud_runs SET lease_until=? WHERE id=? AND employee_id=? AND status IN ('claimed','running')").run(lease, runId, employeeId)
+        this.db.prepare("UPDATE cloud_runs SET lease_until=? WHERE id=? AND employee_id=? AND status IN ('claimed','running') AND lease_until>?").run(lease, runId, employeeId, now)
       }
       const cancelRunIds = this.db.prepare("SELECT id FROM cloud_runs WHERE employee_id=? AND cancel_requested=1 AND status IN ('claimed','running') ORDER BY queued_at LIMIT 50").all(employeeId).map(row => String(row.id))
       return { cancelRunIds, drain }
@@ -316,26 +319,23 @@ export class CloudDatabase {
   }
   progressRun(employeeId: string, id: string, progress: RunProgress): CloudRun {
     return this.transaction(() => {
-      const row = this.lockedRun(employeeId, id)
-      if (row.status !== 'claimed' && row.status !== 'running') throw new CloudError('INVALID_REQUEST', 409, `run is ${String(row.status)}`)
+      this.activeRun(employeeId, id)
       this.db.prepare("UPDATE cloud_runs SET status='running', started_at=COALESCE(started_at,?), session_id=COALESCE(?,session_id), lease_until=? WHERE id=?").run(progress.startedAt, progress.sessionId ?? null, this.iso(this.now() + CLAIM_LEASE_MS), id)
       return this.run(employeeId, id)
     })
   }
   attachArtifact(employeeId: string, id: string, artifact: ArtifactInfo): CloudRun {
     return this.transaction(() => {
-      const row = this.lockedRun(employeeId, id)
-      if (row.status !== 'claimed' && row.status !== 'running') throw new CloudError('INVALID_REQUEST', 409, `run is ${String(row.status)}`)
+      this.activeRun(employeeId, id)
       this.db.prepare('UPDATE cloud_runs SET artifact_json=?, lease_until=? WHERE id=?').run(JSON.stringify(ArtifactInfoSchema.parse(artifact)), this.iso(this.now() + CLAIM_LEASE_MS), id)
       return this.run(employeeId, id)
     })
   }
   completeRun(employeeId: string, id: string, completion: RunCompletion): CloudRun {
     return this.transaction(() => {
-      const row = this.lockedRun(employeeId, id)
-      if (row.status !== 'claimed' && row.status !== 'running') throw new CloudError('INVALID_REQUEST', 409, `run is ${String(row.status)}`)
+      const row = this.activeRun(employeeId, id)
       const stored = row.artifact_json === null ? undefined : ArtifactInfoSchema.parse(JSON.parse(String(row.artifact_json)))
-      if (completion.artifact !== undefined && (stored === undefined || stored.sha256 !== completion.artifact.sha256 || stored.size !== completion.artifact.size)) throw new CloudError('ARTIFACT_MISMATCH', 409, 'completion artifact does not match the uploaded file')
+      if (completion.artifact !== undefined && (stored === undefined || stored.sha256 !== completion.artifact.sha256 || stored.size !== completion.artifact.size || stored.fileCount !== completion.artifact.fileCount)) throw new CloudError('ARTIFACT_MISMATCH', 409, 'completion artifact does not match the uploaded file')
       const now = this.iso()
       this.db.prepare('UPDATE cloud_runs SET status=?, finished_at=?, summary=?, error_code=?, session_id=COALESCE(?,session_id), auto_decisions=COALESCE(?,auto_decisions), artifact_json=? WHERE id=?')
         .run(completion.status, completion.finishedAt, completion.summary, completion.errorCode, completion.sessionId ?? null, completion.autoDecisions ?? null, completion.artifact === undefined ? row.artifact_json ?? null : JSON.stringify(completion.artifact), id)
@@ -346,6 +346,12 @@ export class CloudDatabase {
   private lockedRun(employeeId: string, id: string): Row {
     const row = this.db.prepare('SELECT * FROM cloud_runs WHERE id=? AND employee_id=?').get(id, employeeId)
     if (!row) throw new CloudError('NOT_FOUND', 404)
+    return row
+  }
+  private activeRun(employeeId: string, id: string): Row {
+    const row = this.lockedRun(employeeId, id)
+    if (row.status !== 'claimed' && row.status !== 'running') throw new CloudError('INVALID_REQUEST', 409, `run is ${String(row.status)}`)
+    if (row.lease_until === null || Date.parse(String(row.lease_until)) <= this.now()) throw new CloudError('INVALID_REQUEST', 409, 'run lease expired')
     return row
   }
   private runRecord(row: Row): CloudRun {
@@ -375,9 +381,11 @@ export class CloudDatabase {
         const next = nextRunAt(this.storedDefinition(row), now)
         this.db.prepare('UPDATE cloud_tasks SET next_run_at=?, updated_at=? WHERE id=?').run(next === null ? null : this.iso(next), nowIso, id)
       }
-      for (const row of this.db.prepare("SELECT id, lease_expirations FROM cloud_runs WHERE status IN ('claimed','running') AND lease_until<? LIMIT 500").all(nowIso)) {
+      for (const row of this.db.prepare("SELECT id, lease_expirations, cancel_requested FROM cloud_runs WHERE status IN ('claimed','running') AND lease_until<=? LIMIT 500").all(nowIso)) {
         const id = String(row.id)
-        if (Number(row.lease_expirations) >= MAX_LEASE_EXPIRATIONS) {
+        if (Number(row.cancel_requested) === 1) {
+          this.db.prepare("UPDATE cloud_runs SET status='cancelled', finished_at=?, lease_until=NULL WHERE id=?").run(nowIso, id)
+        } else if (Number(row.lease_expirations) >= MAX_LEASE_EXPIRATIONS) {
           this.db.prepare("UPDATE cloud_runs SET status='failed', finished_at=?, error_code='lease-expired', lease_until=NULL WHERE id=?").run(nowIso, id)
           result.failed.push(id)
         } else {

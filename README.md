@@ -73,6 +73,8 @@ pnpm start
 | adminPasswordEnv | DSH_OPS_WEBSITE_ADMIN_PASSWORD | 注入管理员密码的环境变量名称，配置中不保存密码 |
 | cloud | `{ "enabled": false }` | 云端定时任务控制面与编排器；字段与示例见 [云端定时任务运维手册](docs/runbooks/cloud-tasks.md) |
 
+云端执行当前仍需部署验收：默认 Docker 网络按用户隔离；自定义网络须由部署方配置租户 ACL。模型出口代理、外部请求域名白名单及持久盘配额尚未实现或验证，不能将本地任务成功等同于生产多租户发布验收。容器沙箱的默认与 bubblewrap 兼容模式、Linux 数据目录权限要求见上述运维手册。
+
 从旧配置迁移时，将原 `config/releases.json` 和 `config/website-content.json` 的字段合并到一份 `website.json`，仅保留一个 `schemaVersion`。如果新文件位置改变，应同步调整两个存储目录的相对路径，确保仍指向原数据；无需移动在线内容或发布归档。将官网进程原来的 `DSH_OPS_RELEASE_CONFIG` / `DSH_OPS_WEBSITE_CONTENT_CONFIG` 替换为 `DSH_OPS_WEBSITE_CONFIG` 后重启。只设置旧变量时服务和 CLI 会提示迁移并停止，不会静默改用默认目录。密码环境变量保持原名称。配置修改需要重启服务才能生效。
 
 `websiteUrl` 接受 HTTP 或 HTTPS 源地址，包括内网 IP 和域名，不接受账号密码、子路径、查询串或 fragment；填写纯 URL，不要使用 Markdown 链接格式。`host` 与 `port` 控制实际监听，默认仍为 loopback。内网直连可将 `websiteUrl` 设为 `http://7.192.170.132:4173`，`host` 设为服务器网卡上的 `7.192.170.132`，`port` 保持 `4173`；浏览器也必须使用完全相同的协议、地址与端口。管理员密码要求、Host/Origin、CSRF 和 revision 校验继续生效。HTTP 不加密传输，此方式用于受控内网；公网部署仍应由 HTTPS 网关提供 TLS，并保留 Node 服务的 loopback 监听。仅把 `websiteUrl` 改成 HTTPS 不会自动启用 TLS。

@@ -33,7 +33,7 @@ export const START = Date.parse('2026-09-25T00:00:00.000Z')
 export function cloudConfig(directory: string, overrides: Partial<WebsiteConfig['cloud']> = {}): WebsiteConfig['cloud'] {
   return {
     enabled: true, directory, orchestrator: 'process', idleStopMinutes: 15, executorPollMs: 1000, modelApiKeyEnv: 'DSH_OPS_CLOUD_TEST_MODEL_KEY',
-    docker: { socketPath: '/nonexistent/docker.sock', image: 'dsh-ops-cloud:test', memoryMb: 2048, cpus: 1, network: 'bridge', instancePort: 3080 },
+    docker: { socketPath: '/nonexistent/docker.sock', image: 'dsh-ops-cloud:test', memoryMb: 2048, cpus: 1, network: 'bridge', instancePort: 3080, extraHosts: [], sandbox: 'native' },
     process: { productRepo: '', dshEntry: '', overlays: [], nodeExecutable: '', portRangeStart: 3400 },
     ...overrides,
   }

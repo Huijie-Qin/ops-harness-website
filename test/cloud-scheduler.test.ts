@@ -10,6 +10,14 @@ const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 const employee = 'w00000001'
 
+test('an explicitly configured model reaches the instance environment without persisting its key', async t => {
+  const { runtime, orchestrator } = await cloudFixture(t, { modelBaseUrl: 'https://api.deepseek.com/v1', modelName: 'deepseek-v4-flash' })
+  await runtime.instances.ensureRunning(employee)
+  const env = orchestrator.environments.get(employee)!
+  assert.equal(env.DSH_OPS_CLOUD_MODEL_BASE_URL, 'https://api.deepseek.com/v1')
+  assert.equal(env.DSH_OPS_CLOUD_MODEL_NAME, 'deepseek-v4-flash')
+})
+
 test('due tasks become queued runs, nextRunAt advances and the instance is woken', async t => {
   const { clock, db, runtime, orchestrator } = await cloudFixture(t)
   const task = db.createTask(employee, definition({ schedule: { kind: 'once', at: new Date(START + 5 * MINUTE).toISOString() } }))
@@ -100,6 +108,52 @@ test('heartbeats extend leases of runs the executor still reports', async t => {
   clock.advance(CLAIM_LEASE_MS - 1000)
   assert.deepEqual((await runtime.scheduler.tick()).requeued, [])
   assert.equal(db.run(employee, run.id).status, 'claimed')
+})
+
+test('a cancelled run whose executor disappears finishes cancelled without executing again', async t => {
+  const { clock, db, runtime } = await cloudFixture(t)
+  const task = db.createTask(employee, definition())
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  db.claimRun(employee, employee)
+  db.cancelRun(employee, run.id)
+  clock.advance(CLAIM_LEASE_MS + 1)
+  const tick = await runtime.scheduler.tick()
+  assert.deepEqual(tick.requeued, [])
+  assert.equal(db.run(employee, run.id).status, 'cancelled')
+  assert.equal(db.claimRun(employee, employee), undefined)
+})
+
+test('an executor cannot revive an expired lease before the scheduler has reclaimed it', async t => {
+  const { clock, db } = await cloudFixture(t)
+  const task = db.createTask(employee, definition())
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  db.claimRun(employee, employee)
+  clock.advance(CLAIM_LEASE_MS)
+  db.heartbeat(employee, { contractVersion: 1, instanceId: employee, bundleVersion: '1.0.0', dshVersion: '0.1.5', catalog: { generatedAt: new Date(clock.now()).toISOString(), defaultExpertId: 'product-default', experts: [] }, runningRunIds: [run.id] })
+  const expired = (error: unknown) => error instanceof CloudError && error.status === 409
+  assert.throws(() => db.progressRun(employee, run.id, { status: 'running', startedAt: new Date(clock.now()).toISOString() }), expired)
+  assert.throws(() => db.attachArtifact(employee, run.id, { size: 3, sha256: 'a'.repeat(64), fileCount: 1 }), expired)
+  assert.throws(() => db.completeRun(employee, run.id, { status: 'succeeded', finishedAt: new Date(clock.now()).toISOString(), summary: 'late', errorCode: '' }), expired)
+  assert.deepEqual(db.advance().requeued, [run.id])
+})
+
+test('an administrator stop racing startup waits for that launch and leaves no live revoked executor', async t => {
+  const { runtime, orchestrator, db } = await cloudFixture(t)
+  const original = orchestrator.ensureRunning.bind(orchestrator)
+  let release!: () => void
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  orchestrator.ensureRunning = async (...args) => { entered(); await gate; return original(...args) }
+  const launch = runtime.instances.ensureRunning(employee)
+  await started
+  const stop = runtime.instances.stop(employee)
+  release()
+  await Promise.all([launch, stop])
+  assert.equal((await orchestrator.inspect(employee)).state, 'stopped')
+  assert.equal(db.instanceStatus(employee).state, 'stopped')
+  const token = orchestrator.environments.get(employee)!.DSH_OPS_CLOUD_EXECUTOR_TOKEN!
+  assert.equal(db.authenticate(token, 'executor'), undefined)
 })
 
 test('queued runs nobody claimed within 24 hours expire', async t => {

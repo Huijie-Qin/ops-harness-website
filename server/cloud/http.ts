@@ -11,6 +11,7 @@ import type { AdminHandler } from '../admin-files.js'
 import { GuideError } from '../guide-store.js'
 import type { CloudRuntime } from './index.js'
 import { CloudError, describeFailure } from './errors.js'
+import { CloudEmployeeIdSchema } from './identity.js'
 
 export type CloudHttpOptions = { executorPollMs: number; log?: ((line: string) => void) | undefined; now?: () => number }
 const MAX_JSON_BYTES = 64 * 1024
@@ -36,7 +37,7 @@ const routes: { name: RouteName; methods: string[]; pattern: RegExp }[] = [
   { name: 'executorArtifact', methods: ['PUT'], pattern: new RegExp(`^/executor/runs/${ID}/artifact$`) },
   { name: 'executorComplete', methods: ['POST'], pattern: new RegExp(`^/executor/runs/${ID}/complete$`) },
 ]
-const IssueTokenSchema = z.object({ employeeId: EmployeeIdSchema, label: z.string().trim().max(80).default(''), expiresInDays: z.number().int().min(1).max(3650).optional() }).strict()
+const IssueTokenSchema = z.object({ employeeId: CloudEmployeeIdSchema, label: z.string().trim().max(80).default(''), expiresInDays: z.number().int().min(1).max(3650).optional() }).strict()
 const AdminRunsQuerySchema = z.object({ employeeId: EmployeeIdSchema.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).strict()
 
 function json(res: ServerResponse, value: unknown, status = 200) {
@@ -119,7 +120,13 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
     const { db } = cloud
     switch (name) {
       case 'me': return json(res, MeResponseSchema.parse({ contractVersion: CONTRACT_VERSION, employeeId, displayName: '', instance: db.instanceStatus(employeeId) }))
-      case 'catalog': return json(res, CatalogResponseSchema.parse(db.catalog(employeeId)))
+      case 'catalog': {
+        const catalog = db.catalog(employeeId)
+        // A new user needs the executor's expert list before they can create their first task.
+        // Once a catalog exists, polling it must preserve the instance's idle sleep.
+        if (catalog.catalog === null) void cloud.instances.ensureRunning(employeeId).catch(error => options.log?.(`catalog wake ${employeeId} failed: ${describeFailure(error)}`))
+        return json(res, CatalogResponseSchema.parse(catalog))
+      }
       case 'tasks':
         if (req.method === 'GET') return json(res, TaskListResponseSchema.parse({ tasks: db.listTasks(employeeId) }))
         return json(res, TaskResponseSchema.parse({ task: db.createTask(employeeId, await readJson(req)) }), 201)
