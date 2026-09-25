@@ -15,7 +15,7 @@ import { CloudError } from '../server/cloud/errors.js'
 import { createCloudHandlers } from '../server/cloud/http.js'
 import { createGuideHandler } from '../server/guide-http.js'
 import { GuideStore } from '../server/guide-store.js'
-import { START, cloudFixture } from './cloud-fixture.js'
+import { START, cloudFixture, definition } from './cloud-fixture.js'
 
 const employee = 'w00000042'
 const MINUTE = 60_000
@@ -437,7 +437,7 @@ test('retention: finished sessions, their frames and finished commands are remov
   assert.equal(db.workspace(employee, workspace.id).name, '保留', 'workspaces are not subject to retention')
 })
 
-test('schema: a version 1 database upgrades in place to version 2', async t => {
+test('schema: a version 1 database upgrades in place to version 3', async t => {
   const { root } = await cloudFixture(t)
   const directory = path.join(root, 'v1')
   const { mkdirSync } = await import('node:fs')
@@ -548,13 +548,13 @@ test('schema rejects a newer database without installing phase 2 tables into it'
   mkdirSync(directory)
   const file = path.join(directory, 'cloud.sqlite')
   const future = new DatabaseSync(file)
-  future.exec('CREATE TABLE schema_version(version INTEGER PRIMARY KEY); INSERT INTO schema_version VALUES(3)')
+  future.exec('CREATE TABLE schema_version(version INTEGER PRIMARY KEY); INSERT INTO schema_version VALUES(4)')
   future.close()
   assert.throws(() => new CloudDatabase(directory), /UNSUPPORTED_CLOUD_SCHEMA/)
   const verify = new DatabaseSync(file)
   try {
     assert.deepEqual(verify.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => row.name), ['schema_version'])
-    assert.deepEqual(verify.prepare('SELECT version FROM schema_version ORDER BY version').all().map(row => Number(row.version)), [3])
+    assert.deepEqual(verify.prepare('SELECT version FROM schema_version ORDER BY version').all().map(row => Number(row.version)), [4])
   } finally { verify.close() }
 })
 
@@ -598,4 +598,38 @@ test('session event pages keep 200 small frames but bound large frames by UTF-8 
   assert.deepEqual(sequence, Array.from({ length: 12 }, (_, index) => index + 1))
   const exhausted = await (await f.api(`${cloudRoutes.sessionEvents(large.id)}?since=12`, token)).json() as { events: CloudSessionEvent[]; nextSince: number; hasMore: boolean }
   assert.deepEqual(exhausted.events, []); assert.equal(exhausted.nextSince, 12); assert.equal(exhausted.hasMore, false)
+})
+
+
+test('run/session HTTP opens cold history as read-only and long-polls until its export arrives', async t => {
+  const f = await httpFixture(t)
+  const token = await f.issue(), other = await f.issue('history-other')
+  const executor = await f.executor()
+  const task = f.cloud.db.createTask(employee, definition())
+  const run = f.cloud.db.enqueueRun(employee, task.id, 'manual')
+  const claimed = f.cloud.db.claimRun(employee, employee)!
+  f.cloud.db.completeRun(employee, run.id, { status: 'succeeded', finishedAt: at(), summary: '', errorCode: '', sessionId: 'legacy-session' })
+  const raw = new DatabaseSync(path.join(f.cloud.root, 'cloud', 'cloud.sqlite'))
+  raw.prepare('DELETE FROM cloud_run_sessions WHERE session_id=?').run(claimed.session!.id)
+  raw.prepare('DELETE FROM cloud_sessions WHERE id=?').run(claimed.session!.id)
+  raw.close()
+  assert.equal((await f.api(cloudRoutes.runSession(run.id), other, { method: 'POST' })).status, 404)
+  const response = await f.api(cloudRoutes.runSession(run.id), token, { method: 'POST' })
+  assert.equal(response.status, 200)
+  const session = (await response.json() as { session: CloudSession }).session
+  assert.equal(session.state, 'closed'); assert.equal(session.historyStatus, 'loading')
+  assert.equal((await f.api(cloudRoutes.sessionPrompt(session.id), token, { method: 'POST', data: { prompt: 'should not run' } })).status, 409)
+  assert.equal((await f.api(cloudRoutes.sessionCancel(session.id), token, { method: 'POST' })).status, 409)
+  const command = await f.claim(executor)
+  assert.equal(command?.command.kind, 'session.history')
+  let returned = false
+  const pending = f.api(`${cloudRoutes.sessionEvents(session.id)}?waitMs=500`, token).then(response => { returned = true; return response })
+  await settle()
+  assert.equal(returned, false, 'closed history still waits while a cold import is loading')
+  assert.equal((await f.frames(executor, session.id, [event(1)])).status, 200)
+  const page = await (await pending).json() as { events: CloudSessionEvent[] }
+  assert.equal(page.events.length, 1)
+  assert.equal((await f.result(executor, command!.command.id, { status: 'done' })).status, 204)
+  const ready = await (await f.api(cloudRoutes.runSession(run.id), token, { method: 'POST' })).json() as { session: CloudSession }
+  assert.equal(ready.session.historyStatus, 'ready')
 })

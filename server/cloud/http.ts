@@ -29,7 +29,7 @@ type RouteName =
   | 'me' | 'catalog' | 'tasks' | 'task' | 'taskState' | 'taskRun' | 'runs' | 'run' | 'runCancel' | 'runArtifact'
   | 'executorHeartbeat' | 'executorClaim' | 'executorProgress' | 'executorArtifact' | 'executorComplete'
   | 'workspaces' | 'workspace' | 'workspaceSnapshot' | 'workspaceSnapshotArchive'
-  | 'sessions' | 'session' | 'sessionPrompt' | 'sessionCancel' | 'sessionClose' | 'sessionEvents'
+  | 'runSession' | 'sessions' | 'session' | 'sessionPrompt' | 'sessionCancel' | 'sessionClose' | 'sessionEvents'
   | 'executorCommandClaim' | 'executorCommandResult' | 'executorSessionFrames' | 'executorSessionStatus' | 'executorWorkspaceSnapshot'
 const ID = '([A-Za-z0-9_-]{1,64})'
 const routes: { name: RouteName; methods: string[]; pattern: RegExp }[] = [
@@ -58,6 +58,7 @@ const routes: { name: RouteName; methods: string[]; pattern: RegExp }[] = [
   { name: 'sessionPrompt', methods: ['POST'], pattern: new RegExp(`^/sessions/${ID}/prompt$`) },
   { name: 'sessionCancel', methods: ['POST'], pattern: new RegExp(`^/sessions/${ID}/cancel$`) },
   { name: 'sessionClose', methods: ['POST'], pattern: new RegExp(`^/sessions/${ID}/close$`) },
+  { name: 'runSession', methods: ['POST'], pattern: new RegExp(`^/runs/${ID}/session$`) },
   { name: 'sessionEvents', methods: ['GET'], pattern: new RegExp(`^/sessions/${ID}/events$`) },
   // Phase 2 — command queue and relay (executor token)
   { name: 'executorCommandClaim', methods: ['POST'], pattern: /^\/executor\/commands\/claim$/ },
@@ -193,6 +194,11 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
         const query = parse(RunListQuerySchema, Object.fromEntries(url.searchParams))
         return json(res, RunListResponseSchema.parse(db.listRuns(employeeId, query)))
       }
+      case 'runSession': {
+        const session = db.requestRunSession(employeeId, runId(params[0]!))
+        if (session.historyStatus === 'loading') wake(cloud, employeeId)
+        return json(res, SessionResponseSchema.parse({ session }))
+      }
       case 'run': return json(res, RunResponseSchema.parse({ run: db.run(employeeId, runId(params[0]!)) }))
       case 'runCancel': return json(res, RunResponseSchema.parse({ run: db.cancelRun(employeeId, runId(params[0]!)) }))
       case 'runArtifact': {
@@ -269,7 +275,7 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
         const id = sessionId(params[0]!)
         const query = parse(SessionEventsQuerySchema, Object.fromEntries(url.searchParams))
         let page = db.sessionEvents(employeeId, id, query.since, query.limit)
-        if (page.events.length === 0 && query.waitMs > 0 && !terminalSessionStates.includes(page.session.state)) {
+        if (page.events.length === 0 && query.waitMs > 0 && (!terminalSessionStates.includes(page.session.state) || page.session.historyStatus === 'loading')) {
           // Park until the executor relays something or the session changes; the parked reader does not hold an inflight slot.
           inflight--
           try { await cloud.waiters.wait(id, query.waitMs, res) } finally { inflight++ }

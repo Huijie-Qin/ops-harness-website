@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@dsh-ops/cloud-task-contract':
-        specifier: file:vendor/dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz
-        version: file:vendor/dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz
+        specifier: file:vendor/dsh-ops-cloud-task-contract-0.3.0-282897ba96b6.tgz
+        version: file:vendor/dsh-ops-cloud-task-contract-0.3.0-282897ba96b6.tgz
       '@dsh-ops/release-contract':
         specifier: file:vendor/dsh-ops-release-contract-0.1.1.tgz
         version: file:vendor/dsh-ops-release-contract-0.1.1.tgz
@@ -74,9 +74,9 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@dsh-ops/cloud-task-contract@file:vendor/dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz':
-    resolution: {integrity: sha512-zmBJIk2Mj6i8KHZPx21Z9MN+X5k9KiUujkf1emwLLZD7wNFD0SkkU+MYVIqPTaTf5Wg/ThaBRv3apTmq8zmkZA==, tarball: file:vendor/dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz}
-    version: 0.2.1
+  '@dsh-ops/cloud-task-contract@file:vendor/dsh-ops-cloud-task-contract-0.3.0-282897ba96b6.tgz':
+    resolution: {integrity: sha512-bMD4RMC+XTlzhew3GS+zXpDWBq7fGPgAvOp7wzJsUoy3XXKYFYvY69VkJzOLd7P/4K+WHbslOtZhGD+gzIJfng==, tarball: file:vendor/dsh-ops-cloud-task-contract-0.3.0-282897ba96b6.tgz}
+    version: 0.3.0
 
   '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.1.tgz':
     resolution: {integrity: sha512-1lSQUPujZzrZwxgiOpUF0/GdIEp39IKCxZHw32uAYTMiBEpaxRmUpLLn4F4wwzvgWQejpB9ye0oK4KulByuLyg==, tarball: file:vendor/dsh-ops-release-contract-0.1.1.tgz}
@@ -675,7 +675,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@dsh-ops/cloud-task-contract@file:vendor/dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz':
+  '@dsh-ops/cloud-task-contract@file:vendor/dsh-ops-cloud-task-contract-0.3.0-282897ba96b6.tgz':
     dependencies:
       zod: 4.4.3
 

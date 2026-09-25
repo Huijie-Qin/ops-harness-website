@@ -3,9 +3,9 @@
  * Copyright 2013-2018 Docker, Inc. License and attribution: docs/third-party/moby-v24.0.2/.
  * Source: https://raw.githubusercontent.com/moby/moby/v24.0.2/profiles/seccomp/default.json
  * Source bytes SHA-256: de975c90f9e21d5b887a78c081d46ac483064d1f1942a682ccc1516f52afa921
- * Reviewed bubblewrap profile bytes SHA-256: c3945c2323cf1ca7c014a9393a46f85de1b8208ae57102dd27ae5397b6671ef4
- * Canonical bubblewrap JSON SHA-256: 5ebaddc3fd4104283573c2aa3b14e6c650c0c10735d1cc2c3a44b63d26200c7e
- * The only profile change is the five-syscall allow group appended below.
+ * Reviewed browser probe profile bytes (same allow set, chroot in separate group) SHA-256: 8d0ffaa8c1a86b7353a5f152906679b3378e45f33d68e79f64d094d7db552ece
+ * Canonical bubblewrap JSON SHA-256: 70590fcb0f90a146e26ae9bdd56e2775b3173a1d550bbaeeca20d1e8be11d92d
+ * The only profile change is the six-syscall allow group appended below.
  * Do not broaden this list without repeating the real Docker sandbox probes (ADR 0021).
  */
 const mobyDefaultSeccomp = {
@@ -843,7 +843,7 @@ export type DockerSandbox = 'native' | 'bubblewrap'
 const bubblewrapSeccomp = JSON.stringify({
   ...mobyDefaultSeccomp,
   syscalls: [...mobyDefaultSeccomp.syscalls, {
-    names: ['clone', 'unshare', 'mount', 'umount2', 'pivot_root'],
+    names: ['clone', 'unshare', 'mount', 'umount2', 'pivot_root', 'chroot'],
     action: 'SCMP_ACT_ALLOW',
   }],
 })

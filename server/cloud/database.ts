@@ -25,7 +25,7 @@ export type InstanceRecord = {
 }
 export type InstancePatch = Partial<Omit<InstanceRecord, 'employeeId' | 'updatedAt' | 'hasCatalog' | 'lastActivityAt'>> & { touchActivity?: boolean }
 export type TickResult = { enqueued: string[]; requeued: string[]; failed: string[]; expired: string[]; commandsRequeued: string[]; commandsFailed: string[] }
-export type RunListQuery = { taskId?: string | undefined; limit: number; offset: number }
+export type RunListQuery = { taskId?: string | undefined; search?: string | undefined; statuses?: RunStatus[] | undefined; limit: number; offset: number }
 export type CommandKind = ExecutorCommand['kind']
 export type CommandStatus = 'queued' | 'claimed' | 'done' | 'failed'
 /** Administrator view of one queued executor command (never exposed to users). */
@@ -83,7 +83,7 @@ export class CloudDatabase {
       // Inspect before any schema write: opening an unsupported future database must leave it intact.
       if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").get()) {
         const version = Number(this.db.prepare('SELECT MAX(version) AS version FROM schema_version').get()?.version)
-        if (version !== 1 && version !== 2) throw new Error('UNSUPPORTED_CLOUD_SCHEMA')
+        if (version !== 1 && version !== 2 && version !== 3) throw new Error('UNSUPPORTED_CLOUD_SCHEMA')
       }
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       BEGIN IMMEDIATE;
@@ -110,8 +110,16 @@ export class CloudDatabase {
       CREATE INDEX IF NOT EXISTS commands_queue ON cloud_commands(employee_id, status, created_at);
       CREATE INDEX IF NOT EXISTS commands_lease ON cloud_commands(status, lease_until);
       INSERT OR IGNORE INTO schema_version VALUES(2);
-      COMMIT;
+      -- Schema 3: run/workspace binding and one separately fenced history per claim attempt.
+      CREATE TABLE IF NOT EXISTS cloud_run_workspaces(run_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS run_workspaces_workspace ON cloud_run_workspaces(workspace_id);
+      CREATE TABLE IF NOT EXISTS cloud_run_sessions(session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, attempt INTEGER NOT NULL, history_state TEXT NOT NULL DEFAULT 'ready');
+      CREATE UNIQUE INDEX IF NOT EXISTS run_sessions_attempt ON cloud_run_sessions(run_id, attempt);
+      INSERT OR IGNORE INTO schema_version VALUES(3);
     `)
+      this.correctLegacyWorkspaceNames()
+      this.indexLegacyRunHistories()
+      this.db.exec('COMMIT')
     } catch (error) {
       try { this.db.exec('ROLLBACK') } catch { /* no transaction was started or it already ended */ }
       this.db.close()
@@ -254,6 +262,7 @@ export class CloudDatabase {
     const next = nextRunAt(definition, now)
     if (next === null) throw new CloudError('INVALID_REQUEST', 400, 'schedule never fires in the future')
     return this.transaction(() => {
+      if (definition.workspaceId !== undefined) this.lockedWorkspace(employeeId, definition.workspaceId)
       const count = Number(this.db.prepare('SELECT COUNT(*) AS value FROM cloud_tasks WHERE employee_id=?').get(employeeId)!.value)
       if (count >= MAX_TASKS_PER_USER) throw new CloudError('QUEUE_FULL', 409, `at most ${MAX_TASKS_PER_USER} tasks per user`)
       const id = `ct_${randomBytes(16).toString('hex')}`
@@ -273,6 +282,7 @@ export class CloudDatabase {
     const definition = this.definition(input)
     return this.transaction(() => {
       const current = this.lockedTask(employeeId, id, expectedRevision)
+      if (definition.workspaceId !== undefined) this.lockedWorkspace(employeeId, definition.workspaceId)
       const now = this.now()
       const next = current.state === 'scheduled' ? nextRunAt(definition, now) : null
       if (current.state === 'scheduled' && next === null) throw new CloudError('INVALID_REQUEST', 400, 'schedule never fires in the future')
@@ -341,12 +351,15 @@ export class CloudDatabase {
     const id = `cr_${randomBytes(16).toString('hex')}`
     this.db.prepare('INSERT INTO cloud_runs(id,task_id,employee_id,task_name,definition_json,status,trigger,scheduled_at,queued_at) VALUES(?,?,?,?,?,?,?,?,?)')
       .run(id, taskId, employeeId, definition.name, JSON.stringify(definition), 'queued', trigger, this.iso(scheduledAt), this.iso())
+    this.runWorkspaceLocked(this.lockedRun(employeeId, id))
     return this.run(employeeId, id)
   }
   listRuns(employeeId: string, query: RunListQuery): { runs: CloudRun[]; total: number } {
     const values: SQLInputValue[] = [employeeId]
     let where = 'employee_id=?'
     if (query.taskId !== undefined) { where += ' AND task_id=?'; values.push(query.taskId) }
+    if (query.search) { where += ' AND (instr(lower(task_name), lower(?)) > 0 OR instr(lower(summary), lower(?)) > 0)'; values.push(query.search, query.search) }
+    if (query.statuses?.length) { where += ` AND status IN (${query.statuses.map(() => '?').join(',')})`; values.push(...query.statuses) }
     const total = Number(this.db.prepare(`SELECT COUNT(*) AS value FROM cloud_runs WHERE ${where}`).get(...values)!.value)
     const runs = this.db.prepare(`SELECT * FROM cloud_runs WHERE ${where} ORDER BY queued_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, query.limit, query.offset).map(row => this.runRecord(row))
     return { runs, total }
@@ -374,13 +387,27 @@ export class CloudDatabase {
       const now = this.now()
       this.db.prepare("UPDATE cloud_runs SET status='claimed', claimed_at=?, lease_until=?, executor_instance=? WHERE id=? AND status='queued'").run(this.iso(now), this.iso(now + CLAIM_LEASE_MS), instanceId, row.id!)
       this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(this.iso(now), employeeId)
-      return { run: this.run(employeeId, String(row.id)), definition: CloudTaskDefinitionSchema.parse(JSON.parse(String(row.definition_json))), leaseMs: CLAIM_LEASE_MS }
+      const runRow = this.lockedRun(employeeId, String(row.id))
+      const definition = this.storedDefinition(runRow)
+      const workspace = this.runWorkspaceLocked(runRow)
+      const sessionId = `cs_${randomBytes(16).toString('hex')}`
+      this.db.prepare('INSERT INTO cloud_sessions(id,employee_id,workspace_id,title,expert_id,skill_names_json,state,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(sessionId, employeeId, workspace.id, `${definition.name} · ${String(runRow.scheduled_at)}`.slice(0, 120), definition.expertId, JSON.stringify(definition.skillNames), 'starting', this.iso(now), this.iso(now), this.iso(now))
+      this.db.prepare('INSERT INTO cloud_run_sessions(session_id,run_id,task_id,attempt) VALUES(?,?,?,?)').run(sessionId, String(row.id), String(runRow.task_id), Number(runRow.lease_expirations))
+      this.changed.add(sessionId)
+      return { run: this.run(employeeId, String(row.id)), definition, leaseMs: CLAIM_LEASE_MS, workspace, session: this.session(employeeId, sessionId) }
     })
   }
   progressRun(employeeId: string, id: string, progress: RunProgress): CloudRun {
     return this.transaction(() => {
       this.activeRun(employeeId, id)
       this.db.prepare("UPDATE cloud_runs SET status='running', started_at=COALESCE(started_at,?), session_id=COALESCE(?,session_id), lease_until=? WHERE id=?").run(progress.startedAt, progress.sessionId ?? null, this.iso(this.now() + CLAIM_LEASE_MS), id)
+      const history = this.runHistory(id)
+      if (history) {
+        if (terminalSessionStates.includes(this.session(employeeId, String(history.session_id)).state)) throw new CloudError('INVALID_REQUEST', 409, 'run history is closed')
+        this.db.prepare("UPDATE cloud_sessions SET state='running', instance_session_id=COALESCE(?,instance_session_id), updated_at=?, last_activity_at=? WHERE id=?").run(progress.sessionId ?? null, this.iso(), this.iso(), history.session_id!)
+        this.changed.add(String(history.session_id))
+      }
       return this.run(employeeId, id)
     })
   }
@@ -400,6 +427,13 @@ export class CloudDatabase {
       this.db.prepare('UPDATE cloud_runs SET status=?, finished_at=?, summary=?, error_code=?, session_id=COALESCE(?,session_id), auto_decisions=COALESCE(?,auto_decisions), artifact_json=? WHERE id=?')
         .run(completion.status, completion.finishedAt, completion.summary, completion.errorCode, completion.sessionId ?? null, completion.autoDecisions ?? null, completion.artifact === undefined ? row.artifact_json ?? null : JSON.stringify(completion.artifact), id)
       this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(now, employeeId)
+      const history = this.runHistory(id)
+      if (history) {
+        this.db.prepare('UPDATE cloud_run_sessions SET history_state=? WHERE session_id=?').run(completion.historyComplete === false ? 'unavailable' : 'ready', history.session_id!)
+        this.db.prepare("UPDATE cloud_sessions SET state=?, instance_session_id=COALESCE(?,instance_session_id), turns=CASE WHEN ?='succeeded' THEN 1 ELSE turns END, error_code=?, error_message=?, updated_at=?, last_activity_at=? WHERE id=?")
+          .run(completion.status === 'failed' || completion.status === 'timed-out' ? 'failed' : 'closed', completion.sessionId ?? null, completion.status, completion.historyComplete === false && !completion.errorCode ? 'history-incomplete' : completion.errorCode, completion.historyComplete === false ? '日志回传未完成，可重新打开历史以读取实例日志。' : completion.status === 'succeeded' ? '' : completion.summary.slice(0, 500), now, now, history.session_id!)
+        this.changed.add(String(history.session_id))
+      }
       return this.run(employeeId, id)
     })
   }
@@ -414,8 +448,108 @@ export class CloudDatabase {
     if (row.lease_until === null || Date.parse(String(row.lease_until)) <= this.now()) throw new CloudError('INVALID_REQUEST', 409, 'run lease expired')
     return row
   }
+  /** Upgrade indexes existing retained logs without waking instances or reading their volumes. */
+  private indexLegacyRunHistories(): void {
+    const rows = this.db.prepare("SELECT * FROM cloud_runs WHERE session_id IS NOT NULL AND session_id<>'' AND status NOT IN ('queued','claimed','running') AND id NOT IN (SELECT run_id FROM cloud_run_sessions)").all()
+    for (const row of rows) this.createLegacyRunHistoryLocked(row)
+  }
+  private createLegacyRunHistoryLocked(row: Row): CloudSession {
+    const employeeId = String(row.employee_id)
+    const workspace = this.runWorkspaceLocked(row)
+    const definition = this.storedDefinition(row)
+    const id = `cs_${randomBytes(16).toString('hex')}`
+    const at = String(row.finished_at ?? row.queued_at)
+    this.db.prepare('INSERT INTO cloud_sessions(id,employee_id,workspace_id,title,expert_id,skill_names_json,state,instance_session_id,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, employeeId, workspace.id, String(row.task_name).slice(0, 120), definition.expertId, JSON.stringify(definition.skillNames), 'closed', row.session_id!, String(row.queued_at), at, at)
+    this.db.prepare("INSERT INTO cloud_run_sessions(session_id,run_id,task_id,attempt,history_state) VALUES(?,?,?,?,'not-loaded')")
+      .run(id, String(row.id), String(row.task_id), Number(row.lease_expirations))
+    return this.session(employeeId, id)
+  }
+  /** Open scheduled-task history. Existing live histories are returned; cold legacy logs are exported only on demand. */
+  requestRunSession(employeeId: string, runId: string): CloudSession {
+    return this.transaction(() => {
+      const row = this.lockedRun(employeeId, runId)
+      let history = this.runHistory(runId)
+      if (!history) {
+        if (!isTerminalRunStatus(row.status as RunStatus) || !row.session_id) throw new CloudError('NOT_FOUND', 404, 'this run has no available session log')
+        this.createLegacyRunHistoryLocked(row)
+        history = this.runHistory(runId)!
+      }
+      const id = String(history.session_id)
+      if (isTerminalRunStatus(row.status as RunStatus) && (history.history_state === 'not-loaded' || history.history_state === 'unavailable')) {
+        if (!this.session(employeeId, id).instanceSessionId) throw new CloudError('NOT_FOUND', 404, 'this run has no available session log')
+        if (history.history_state === 'unavailable') {
+          this.db.prepare('DELETE FROM cloud_session_events WHERE session_id=?').run(id)
+          this.db.prepare('UPDATE cloud_sessions SET last_seq=0 WHERE id=?').run(id)
+        }
+        this.enqueueCommandLocked(employeeId, 'session.history', { sessionId: id })
+        this.db.prepare("UPDATE cloud_run_sessions SET history_state='loading' WHERE session_id=?").run(id)
+        this.db.prepare("UPDATE cloud_sessions SET state='closed', error_code='', error_message='', updated_at=? WHERE id=?").run(this.iso(), id)
+        this.changed.add(id)
+      }
+      return this.session(employeeId, id)
+    })
+  }
+  private runHistory(runId: string): Row | undefined {
+    return this.db.prepare('SELECT * FROM cloud_run_sessions WHERE run_id=? ORDER BY attempt DESC LIMIT 1').get(runId)
+  }
+  /** Repair only our exact former automatic label; user-selected workspace identities/names remain untouched. */
+  private correctLegacyWorkspaceNames(): void {
+    const rows = this.db.prepare("SELECT * FROM cloud_workspaces WHERE name='定时任务 ' || relative_path").all()
+    for (const row of rows) {
+      const employeeId = String(row.employee_id), taskId = String(row.relative_path)
+      if (row.id !== `cw_${sha256(`${employeeId}:${taskId}`).slice(0, 32)}`) continue
+      const task = this.db.prepare('SELECT * FROM cloud_tasks WHERE id=? AND employee_id=?').get(taskId, employeeId)
+      const taskName = task ? this.storedDefinition(task).name : this.db.prepare('SELECT task_name FROM cloud_runs WHERE task_id=? AND employee_id=? ORDER BY queued_at DESC LIMIT 1').get(taskId, employeeId)?.task_name
+      if (!taskName) continue
+      const name = this.legacyWorkspaceName(employeeId, String(taskName), String(row.id))
+      if (name === row.name) continue
+      this.db.prepare('UPDATE cloud_workspaces SET name=?, updated_at=? WHERE id=?').run(name, this.iso(), row.id!)
+    }
+  }
+  private legacyWorkspaceName(employeeId: string, taskName: string, excludeId = ''): string {
+    const cleaned = taskName.replace(/[\\/:*?"<>|\u0000-\u001f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+    const base = cleaned && cleaned !== '.' && cleaned !== '..' ? cleaned : '定时任务'
+    let suffix = 1
+    for (;;) {
+      const tail = suffix === 1 ? '' : ` (${suffix})`
+      const name = base.slice(0, 64 - tail.length).replace(/[\uD800-\uDBFF]$/u, '').trimEnd() + tail
+      if (!this.db.prepare('SELECT 1 FROM cloud_workspaces WHERE employee_id=? AND name=? AND id<>?').get(employeeId, name, excludeId)) return name
+      suffix += 1
+    }
+  }
+  /** Legacy tasks keep the same physical ct_ directory; new task definitions choose an existing named workspace. */
+  private runWorkspaceLocked(row: Row): CloudWorkspace {
+    const employeeId = String(row.employee_id)
+    const existing = this.db.prepare('SELECT workspace_id FROM cloud_run_workspaces WHERE run_id=?').get(String(row.id))
+    if (existing) return this.workspace(employeeId, String(existing.workspace_id))
+    const definition = this.storedDefinition(row)
+    let workspaceId = definition.workspaceId
+    if (workspaceId === undefined) {
+      workspaceId = `cw_${sha256(`${employeeId}:${String(row.task_id)}`).slice(0, 32)}`
+      const now = this.iso()
+      // Registration reflects a pre-existing per-task directory, so the named-workspace creation cap does not discard legacy task data.
+      if (!this.db.prepare('SELECT 1 FROM cloud_workspaces WHERE id=?').get(workspaceId)) {
+        const name = this.legacyWorkspaceName(employeeId, definition.name)
+        this.db.prepare('INSERT INTO cloud_workspaces(id,employee_id,name,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)')
+          .run(workspaceId, employeeId, name, String(row.task_id), now, now)
+      }
+    }
+    const workspace = this.workspace(employeeId, workspaceId)
+    this.db.prepare('INSERT INTO cloud_run_workspaces(run_id,workspace_id) VALUES(?,?)').run(String(row.id), workspaceId)
+    return workspace
+  }
+  private scheduledHistory(row: Row): Row | undefined {
+    return this.db.prepare('SELECT * FROM cloud_run_sessions WHERE session_id=?').get(String(row.id))
+  }
+  private assertInteractive(row: Row): void {
+    if (this.scheduledHistory(row)) throw new CloudError('INVALID_REQUEST', 409, 'scheduled task history is read-only; control the owning run instead')
+  }
   private runRecord(row: Row): CloudRun {
+    const binding = this.db.prepare('SELECT workspace_id FROM cloud_run_workspaces WHERE run_id=?').get(String(row.id))
+    const history = this.runHistory(String(row.id))
     return CloudRunSchema.parse({
+      ...(binding ? { cloudWorkspaceId: binding.workspace_id } : {}), ...(history ? { cloudSessionId: history.session_id } : {}),
       id: row.id, taskId: row.task_id, employeeId: row.employee_id, taskName: row.task_name, status: row.status, trigger: row.trigger,
       scheduledAt: row.scheduled_at, queuedAt: row.queued_at,
       ...(row.claimed_at ? { claimedAt: row.claimed_at } : {}), ...(row.started_at ? { startedAt: row.started_at } : {}), ...(row.finished_at ? { finishedAt: row.finished_at } : {}),
@@ -451,6 +585,9 @@ export class CloudDatabase {
   deleteWorkspace(employeeId: string, id: string): { hadSnapshot: boolean } {
     return this.transaction(() => {
       const row = this.lockedWorkspace(employeeId, id)
+      const taskBinding = this.db.prepare("SELECT 1 FROM cloud_tasks WHERE employee_id=? AND (json_extract(definition_json, '$.workspaceId')=? OR id=?) LIMIT 1").get(employeeId, id, String(row.relative_path))
+      const runBinding = this.db.prepare("SELECT 1 FROM cloud_run_workspaces w JOIN cloud_runs r ON r.id=w.run_id WHERE w.workspace_id=? AND r.status IN ('queued','claimed','running') LIMIT 1").get(id)
+      if (taskBinding || runBinding) throw new CloudError('TASK_RUNNING', 409, 'this workspace is referenced by a scheduled task or unfinished run')
       const active = Number(this.db.prepare(`SELECT COUNT(*) AS value FROM cloud_sessions WHERE workspace_id=? AND state IN (${activeSessionStates.map(() => '?').join(',')})`).get(id, ...activeSessionStates)!.value)
       if (active > 0) throw new CloudError('TASK_RUNNING', 409, 'close the sessions using this workspace first')
       const now = this.iso()
@@ -517,6 +654,7 @@ export class CloudDatabase {
   promptSession(employeeId: string, id: string, request: { prompt: string; mode: 'queue' | 'steer' }): CloudSession {
     return this.transaction(() => {
       const row = this.lockedSession(employeeId, id)
+      this.assertInteractive(row)
       if (row.state !== 'idle' && row.state !== 'running') throw new CloudError('INVALID_REQUEST', 409, `session is ${String(row.state)}`)
       this.enqueueCommandLocked(employeeId, 'session.prompt', { sessionId: id, prompt: request.prompt, mode: request.mode })
       const now = this.iso()
@@ -529,6 +667,7 @@ export class CloudDatabase {
   cancelSession(employeeId: string, id: string): CloudSession {
     return this.transaction(() => {
       const row = this.lockedSession(employeeId, id)
+      this.assertInteractive(row)
       if (row.state !== 'starting' && row.state !== 'idle' && row.state !== 'running') throw new CloudError('INVALID_REQUEST', 409, `session is ${String(row.state)}`)
       const now = this.iso()
       this.db.prepare('UPDATE cloud_sessions SET cancel_requested=1, updated_at=?, last_activity_at=? WHERE id=?').run(now, now, id)
@@ -550,6 +689,7 @@ export class CloudDatabase {
     })
   }
   private closeSessionLocked(row: Row) {
+    this.assertInteractive(row)
     const id = String(row.id), state = row.state as CloudSessionState
     if (terminalSessionStates.includes(state)) return
     const now = this.iso()
@@ -586,6 +726,17 @@ export class CloudDatabase {
   appendSessionFrames(employeeId: string, id: string, events: CloudSessionEvent[]): { lastSeq: number; cancelRequested: boolean } {
     const limit = this.options.maxEventsPerSession ?? DEFAULT_MAX_EVENTS_PER_SESSION
     const row = this.lockedSession(employeeId, id)
+    const history = this.scheduledHistory(row)
+    if (history) {
+      if (history.history_state === 'loading') {
+        const command = this.db.prepare("SELECT lease_until FROM cloud_commands WHERE employee_id=? AND session_id=? AND kind='session.history' AND status='claimed'").get(employeeId, id)
+        if (!command?.lease_until || Date.parse(String(command.lease_until)) <= this.now()) throw new CloudError('INVALID_REQUEST', 409, 'history command lease expired')
+      } else {
+        this.activeRun(employeeId, String(history.run_id))
+        if (this.runHistory(String(history.run_id))?.session_id !== id) throw new CloudError('INVALID_REQUEST', 409, 'stale run history')
+        if (terminalSessionStates.includes(row.state as CloudSessionState)) throw new CloudError('INVALID_REQUEST', 409, 'run history is closed')
+      }
+    }
     if (row.state === 'failed') throw new CloudError('INVALID_REQUEST', 409, 'session is failed')
     for (let index = 1; index < events.length; index += 1) if (events[index]!.seq !== events[index - 1]!.seq + 1) throw new CloudError('INVALID_REQUEST', 400, 'batch sequence numbers are not contiguous')
     const lastSeq = Number(row.last_seq)
@@ -617,6 +768,7 @@ export class CloudDatabase {
   reportSessionStatus(employeeId: string, id: string, report: { state: 'idle' | 'running' | 'closed' | 'failed'; turns?: number | undefined; errorCode: string; errorMessage: string }): CloudSession {
     return this.transaction(() => {
       const row = this.lockedSession(employeeId, id)
+      this.assertInteractive(row)
       if (terminalSessionStates.includes(row.state as CloudSessionState)) return this.sessionRecord(row)
       const now = this.iso()
       const clearsCancel = report.state !== 'running'
@@ -657,7 +809,9 @@ export class CloudDatabase {
     return row
   }
   private sessionRecord(row: Row): CloudSession {
+    const history = this.scheduledHistory(row)
     return CloudSessionSchema.parse({
+      ...(history ? { source: 'scheduled-task', runId: history.run_id, taskId: history.task_id, historyStatus: history.history_state } : {}),
       id: row.id, employeeId: row.employee_id, workspaceId: row.workspace_id, title: row.title, expertId: row.expert_id, skillNames: JSON.parse(String(row.skill_names_json)),
       state: row.state, ...(row.instance_session_id ? { instanceSessionId: row.instance_session_id } : {}), lastSeq: Number(row.last_seq), turns: Number(row.turns),
       errorCode: row.error_code, errorMessage: row.error_message, cancelRequested: Number(row.cancel_requested) === 1,
@@ -717,6 +871,11 @@ export class CloudDatabase {
       if (row.lease_until === null || Date.parse(String(row.lease_until)) <= this.now()) throw new CloudError('INVALID_REQUEST', 409, 'command lease expired')
       const kind = String(row.kind) as CommandKind, sessionId = row.session_id === null ? undefined : String(row.session_id), workspaceId = row.workspace_id === null ? undefined : String(row.workspace_id)
       const now = this.iso()
+      if (kind === 'session.history' && sessionId) {
+        this.db.prepare('UPDATE cloud_run_sessions SET history_state=? WHERE session_id=?').run(result.status === 'done' ? 'ready' : 'unavailable', sessionId)
+        this.db.prepare('UPDATE cloud_sessions SET error_code=?, error_message=?, updated_at=? WHERE id=?').run(result.errorCode, result.message.slice(0, 500), now, sessionId)
+        this.changed.add(sessionId)
+      }
       if (result.status === 'failed') {
         this.finishCommand(id, result, now)
         if (sessionId) this.failSessionLocked(sessionId, result.errorCode || 'command-failed', result.message || `${kind} failed in the instance`)
@@ -799,6 +958,8 @@ export class CloudDatabase {
       }
       for (const row of this.db.prepare("SELECT id, lease_expirations, cancel_requested FROM cloud_runs WHERE status IN ('claimed','running') AND lease_until<=? LIMIT 500").all(nowIso)) {
         const id = String(row.id)
+        const history = this.runHistory(id)
+        if (history) this.failSessionLocked(String(history.session_id), 'lease-expired', 'the run attempt lost its lease')
         if (Number(row.cancel_requested) === 1) {
           this.db.prepare("UPDATE cloud_runs SET status='cancelled', finished_at=?, lease_until=NULL WHERE id=?").run(nowIso, id)
         } else if (Number(row.lease_expirations) >= MAX_LEASE_EXPIRATIONS) {
@@ -818,6 +979,7 @@ export class CloudDatabase {
         const id = String(row.id), kind = String(row.kind) as CommandKind
         if (Number(row.attempts) >= MAX_COMMAND_ATTEMPTS) {
           this.finishCommand(id, { status: 'failed', errorCode: 'command-lease-expired', message: 'the executor did not report a result before the lease expired' }, nowIso)
+          if (kind === 'session.history') this.db.prepare("UPDATE cloud_run_sessions SET history_state='unavailable' WHERE session_id=?").run(row.session_id!)
           if (row.session_id !== null) this.failSessionLocked(String(row.session_id), 'command-lease-expired', `${kind} was not completed by the instance`)
           result.commandsFailed.push(id)
         } else {
@@ -851,13 +1013,21 @@ export class CloudDatabase {
     return this.transaction(() => {
       const before = this.iso(this.now() - RESULT_RETENTION_DAYS * DAY)
       const ids = this.db.prepare('SELECT id FROM cloud_runs WHERE finished_at IS NOT NULL AND finished_at<? LIMIT 5000').all(before).map(row => String(row.id))
-      for (const id of ids) this.db.prepare('DELETE FROM cloud_runs WHERE id=?').run(id)
+      for (const id of ids) {
+        for (const history of this.db.prepare('SELECT session_id FROM cloud_run_sessions WHERE run_id=?').all(id)) {
+          this.finishSessionCommands(String(history.session_id), 'history-expired', 'the run history retention window ended', this.iso())
+          this.db.prepare('DELETE FROM cloud_sessions WHERE id=?').run(history.session_id!)
+        }
+        this.db.prepare('DELETE FROM cloud_runs WHERE id=?').run(id)
+      }
       this.db.prepare('DELETE FROM cloud_tokens WHERE (revoked_at IS NOT NULL AND revoked_at<?) OR (expires_at IS NOT NULL AND expires_at<?)').run(this.iso(this.now() - TOKEN_GRACE_DAYS * DAY), this.iso(this.now() - TOKEN_GRACE_DAYS * DAY))
       for (const row of this.db.prepare("SELECT id FROM cloud_sessions WHERE state IN ('closed','failed') AND updated_at<? LIMIT 5000").all(before)) {
         this.db.prepare('DELETE FROM cloud_session_events WHERE session_id=?').run(String(row.id))
         this.db.prepare('DELETE FROM cloud_sessions WHERE id=?').run(String(row.id))
       }
       this.db.prepare('DELETE FROM cloud_session_events WHERE session_id NOT IN (SELECT id FROM cloud_sessions)').run()
+      this.db.prepare('DELETE FROM cloud_run_sessions WHERE session_id NOT IN (SELECT id FROM cloud_sessions)').run()
+      this.db.prepare('DELETE FROM cloud_run_workspaces WHERE run_id NOT IN (SELECT id FROM cloud_runs)').run()
       this.db.prepare("DELETE FROM cloud_commands WHERE status IN ('done','failed') AND finished_at<?").run(before)
       return ids
     })

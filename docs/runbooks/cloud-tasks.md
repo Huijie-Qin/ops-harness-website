@@ -1,6 +1,6 @@
 # 云端定时任务：控制面与编排器运维
 
-官网作为终端工作助手"云端定时任务"的控制面与编排器（决策见 [ADR 0021](../adr/0021-cloud-task-execution.md)）。本手册覆盖配置、令牌签发、两种实例后端、目录布局与故障排查；第二期（持久云端工作区、云端会话、执行器命令队列与事件回传）见文末专节。协议以 vendor 中的 `@dsh-ops/cloud-task-contract`（0.2.1，contractVersion 1）为准，路径前缀 `/api/cloud/v1`。
+官网作为终端工作助手"云端定时任务"的控制面与编排器（决策见 [ADR 0021](../adr/0021-cloud-task-execution.md)）。本手册覆盖配置、令牌签发、两种实例后端、目录布局与故障排查；第二期（持久云端工作区、云端会话、执行器命令队列与事件回传）见文末专节。协议以 vendor 中的 `@dsh-ops/cloud-task-contract`（0.3.0，contractVersion 1）为准，路径前缀 `/api/cloud/v1`。
 
 ## 配置
 
@@ -73,7 +73,7 @@
 
 - 官网进程需要读写 `cloud.docker.socketPath`；镜像需预先构建并存在于该 Docker 主机（官网不会拉取镜像，缺镜像时实例 `last_error` 为 `image … not found`）。
 - Linux 或没有内置宿主机 DNS 的 Docker Desktop 上，`websiteUrlForInstances: "http://host.docker.internal:4173"` 应配合 `extraHosts: ["host.docker.internal:host-gateway"]`；官网监听地址须能接受来自容器网关的连接。不要把 `127.0.0.1` 当作容器访问宿主机的地址。修改映射后新建实例才生效，已运行容器应先有序停止再唤醒。
-- 若 DSH 报告原生沙箱不可用，可在安装 bubblewrap 的非 root 镜像上显式选 `sandbox: "bubblewrap"`。官网仅使用受控 Moby v24.0.2 seccomp 快照加 5 项 syscall，固定无 capabilities、禁止提权、只读 root 与 `/tmp` tmpfs（`rw,exec,nosuid,nodev,size=128m,mode=1777`）；不会使用 privileged/unconfined 或加载任意 profile。`exec` 供 DSH 官方原生模块加载器从临时缓存 `dlopen` 预编译模块，默认 `noexec` 会导致映射失败；无需修改依赖包或私有缓存设置。该模式调整 `/proc` mount 限制以允许 bwrap 建立内部隔离，外部出站限制仍需网络网关提供，详见 [ADR 0021](../adr/0021-cloud-task-execution.md)。
+- 若 DSH 报告原生沙箱不可用，可在安装 bubblewrap 的非 root 镜像上显式选 `sandbox: "bubblewrap"`。官网仅使用受控 Moby v24.0.2 seccomp 快照加 6 项 syscall，固定无 capabilities、禁止提权、只读 root 与 `/tmp` tmpfs（`rw,exec,nosuid,nodev,size=128m,mode=1777`）；不会使用 privileged/unconfined 或加载任意 profile。`exec` 供 DSH 官方原生模块加载器从临时缓存 `dlopen` 预编译模块，默认 `noexec` 会导致映射失败；无需修改依赖包或私有缓存设置。该模式调整 `/proc` mount 限制以允许 bwrap 建立内部隔离，外部出站限制仍需网络网关提供，详见 [ADR 0021](../adr/0021-cloud-task-execution.md)。
 - 默认 `network: "bridge"` 会为每个工号创建独立网络，名称 `dsh-ops-cloud-net-<目录hash>-<工号>`，仅允许自有实例接入；停止删除实例后回收该空网络。显式配置其他网络时，部署者负责跨租户 ACL，官网不管理其生命周期。修改 sandbox、网络或用户后，已运行实例须有序停止再重建；不会为了配置更新强杀正在执行的任务。
 - 容器名 `dsh-ops-cloud-<工号>`，标签 `dsh-ops.cloud.employee`；数据卷 `<directory>/instances/<工号>/home:/data/home`（容器内 `DSH_HOME=/data/home`）。
 - Linux 部署应使用专用非 root 官网用户，并让 `cloud.docker.user` 与新建 home 目录的 UID/GID 一致；已有 home 由部署人员核对所有权。官网不会递归改写已有数据的 owner，也不使用 `chmod 777`。Docker Desktop 的文件共享映射可能允许原本 UID 不匹配的写入，不能替代 Linux 权限验收。
@@ -95,14 +95,14 @@
 
 ```text
 <cloud.directory>/
-  cloud.sqlite            # 令牌（只有 sha256）、实例、任务、运行、工作区、会话与事件、命令队列（node:sqlite，WAL，schema 2）
+  cloud.sqlite            # 令牌（只有 sha256）、实例、任务、运行、工作区、会话与事件、命令队列（node:sqlite，WAL，schema 3）
   artifacts/<runId>.zip   # 执行器上传的产物，sha256 校验后落盘，7 天后随运行记录删除
   artifacts/ws_<workspaceId>.zip  # 工作区快照，每个工作区只保留最新一份，随工作区删除
   instances/<工号>/home/  # 该用户实例的 DSH_HOME（容器内挂到 /data/home）
   instances/<工号>/instance.log   # 仅进程后端
 ```
 
-首次用第二期官网（cloud-task-contract 0.2.1）打开旧的 `cloud.sqlite`（schema 1）时会在事务中原地追加第二期的表并把 schema 记为 2；升级只增表不改旧表，可重复执行。不支持的数据库版本在任何 schema 写入前拒绝，迁移出错则回滚并停止启动。
+第二期 0.2.1 曾将 `cloud.sqlite` 从 schema 1 升到 2。当前 0.3.0 在同一事务中追加所需表并升级到 schema 3（含下文的旧运行会话索引）；只增表不改旧表，可重复执行。不支持的数据库版本在任何 schema 写入前拒绝，迁移出错则回滚并停止启动。
 
 备份 `cloud.directory` 整体（含 SQLite WAL/SHM）。删除某个用户的实例数据前先在后台停止实例。
 
@@ -194,3 +194,17 @@
 最后补充专家必要工具可用性判断后的产品最终镜像 `sha256:8293475f929e846652ef54f0650875f4dd02bb12d7a341e68c95943af28f6884` 已重建并重复通过真实 Bash 验收。运行 `cr_650d49a81d8a3567323a1a13a7a706e7` 耗时 3.958 秒，新会话包含实际 Bash `tool/call` 与 `tool/result` 验收标记，下载产物再次通过工作区可写、外目录写入拒绝、模型 Key 与执行器令牌在命令子进程环境不可见四项断言。最终镜像复验与各项证据见产品仓库 [Docker 端到端验收报告](../../../ops-harness/docs/qa/cloud-tasks-docker-e2e-2026-09-25.md)（本地并列检出路径）。
 
 生产 Linux/x64 与 bind mount UID/GID 权限仍须单独验收。模型出口代理、外部请求域名白名单与持久盘配额尚未实现或验证；自定义共享网络的跨租户 ACL 属于部署方责任。这些边界不因本地 Docker 链路或模拟模型测试成功而完成。
+
+### 0.3.0 工作区会话历史
+
+schema 3 在启动事务中追加两张关联表，幂等索引旧终态 run 的 sessionId；迁移不读取实例卷、不执行任务。请先保留备份，再协调更新官网与执行器镜像，旧执行器无法识别 `session.history`。不应通过重启有运行任务的实例强制切换。
+
+新任务可填 `workspaceId`，旧任务省略时保持原任务目录并注册到云工作区，显示规范化后的任务名称，重名加序号。早期 schema 3 生成的精确 `定时任务 ct_…` 自动名，会在下次启动事务中幂等校正；只匹配稳定自动标识和原任务目录，不更改用户自定名称或文件路径。会话列表同时包含交互与定时任务历史；`source=scheduled-task` 的会话只读，`runId/taskId` 可回到运行详情。run.list 支持 search 文字及 statuses 逗号枚举过滤，省略 statuses 表示全部。
+
+打开旧运行调用 `POST /api/cloud/v1/runs/:id/session`，返回 `{session}`。`historyStatus=not-loaded/loading/ready/unavailable` 区分待读取、读取中、已就绪和不可用；loading 时实例会按需唤醒，读取完成后继续遵循空闲休眠。该命令只读 DSH 公开历史接口，不重新执行模型。若不可用，检查原用户持久卷/sessionId 是否仍在、命令租约与日志大小，恢复后可重复该 POST。无 sessionId 的旧失败运行会明确返回 NOT_FOUND。每条记录不得超过 512 KiB，冷读取总量最多 64 MiB/49,999 条；同一命令租约内重试可按已确认序号续传；失败后用户重新请求会清空不完整前缀，再由完整冷日志重建。
+
+2026-09-26 Linux Chromium 实测要求 bubblewrap profile 增加 `chroot`，与原五调用合计六项；`native` 模式不放宽规则。只对重新创建的容器生效，现有任务应先收尾。Chromium 本身保留沙箱，不加 `--no-sandbox`。出站白名单、模型代理、磁盘 quota 和生产 Linux/x64 验收仍是独立部署边界。
+
+目录可选 `capabilities` 由实际 Tool Market 状态与 overlay 的 `disabledTools` 上报；不直接转发诊断消息、路径、登录身份。已添加浏览器每次心跳前做 3 秒内只读就绪检查，失败不保留过时的 available；WeLink 等工具按实际状态展示，不能以 Linux 平台概括为不支持。
+
+2026-09-26 已在完整产品镜像 `0f54d3e6c025ec8d15d8cb0baa26c4036416a636ac5fb729bcc9b8816b9cf4b2` 通过真实模型跨轮工具执行、同工作区调度任务、完整实时历史、只读边界、旧日志按需导出及缺失后恢复。冷导出逐条恢复 29 条原生事件，原生日志字节与哈希不变；失败后本地旧事件缓存清空，恢复后仍使用同一历史入口。独立 QA 数据与证据详见[会话历史 Docker 验收记录](../qa/cloud-history-docker-e2e-2026-09-26.md)。

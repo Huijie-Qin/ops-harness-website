@@ -1,17 +1,17 @@
 {
   "name": "@dsh-ops/cloud-task-contract",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "sourceRepository": "ops-harness (worktree cloud-workspace-task-execution-123920)",
-  "sourceCommit": "4a0f9bf026f52b685fc96304713e0c5e13c3bc01",
-  "sourceWorkingTree": false,
+  "sourceCommit": "9cc685f5228a2b7d5ac92c8cbaea8804d27bec1f",
+  "sourceWorkingTree": true,
   "sourcePath": "packages/shared/cloud-task-contract",
-  "artifact": "dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz",
-  "sha256": "2e5b9f053348db12714c93e05556aef3639ac159eba66dfdbec3c5998e3b8202",
+  "artifact": "dsh-ops-cloud-task-contract-0.3.0-282897ba96b6.tgz",
+  "sha256": "282897ba96b6750cdfa07f38d77ac8e10a0b61cb0b664299ee893998d3d918fa",
   "sourceSha256": {
-    "package.json": "0ddad4da0d6e299d27f43b70f507e1da97367d5443aa4642d8d39e6d44d5e0ec",
+    "package.json": "be64419c19272a04c8a38cf2eb4d6e195b5b911c5b668201bdbb5c391a6c2866",
     "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad",
-    "README.md": "ac8a2b9a69445bba36b3040ad3eb19ba8dd59ee12172a771763cb72e6f9e9ffe",
-    "src/index.ts": "80b50db7c42fbbe03452f073cc7827f184c48dd8554e1dc2577ed54b990c5f6d"
+    "README.md": "a7711a16a3bbf1c75af213eddd1b342f30ebb1aa99a90f0ac5ae702dadbde18a",
+    "src/index.ts": "100c47a686d5d3fa3225e761ff87c2e5e75d89376e441c2278812ef936955f7a"
   },
   "packageManager": "pnpm@11.19.0",
   "contractVersion": 1

@@ -143,9 +143,9 @@ test('bubblewrap uses the reviewed seccomp extension with no capabilities and a 
   assert.equal(options[0], 'no-new-privileges=true')
   assert.ok(options[1]!.startsWith('seccomp={'))
   const seccomp = JSON.parse(options[1]!.slice('seccomp='.length)) as { defaultAction: string; syscalls: { names: string[]; action: string }[] }
-  assert.equal(createHash('sha256').update(JSON.stringify(seccomp)).digest('hex'), '5ebaddc3fd4104283573c2aa3b14e6c650c0c10735d1cc2c3a44b63d26200c7e', 'the entire profile must match the reviewed Docker probe')
+  assert.equal(createHash('sha256').update(JSON.stringify(seccomp)).digest('hex'), '70590fcb0f90a146e26ae9bdd56e2775b3173a1d550bbaeeca20d1e8be11d92d', 'the entire profile must match the reviewed Docker probe')
   assert.equal(seccomp.defaultAction, 'SCMP_ACT_ERRNO')
-  assert.deepEqual(seccomp.syscalls.at(-1), { names: ['clone', 'unshare', 'mount', 'umount2', 'pivot_root'], action: 'SCMP_ACT_ALLOW' })
+  assert.deepEqual(seccomp.syscalls.at(-1), { names: ['clone', 'unshare', 'mount', 'umount2', 'pivot_root', 'chroot'], action: 'SCMP_ACT_ALLOW' })
   assert.ok(!options.includes('seccomp=unconfined'))
 })
 

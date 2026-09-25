@@ -1,0 +1,202 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { CLAIM_LEASE_MS, RunListQuerySchema } from '@dsh-ops/cloud-task-contract'
+import { cloudFixture, definition, START } from './cloud-fixture.js'
+
+const employee = 'history-owner'
+const at = new Date(START).toISOString()
+
+test('scheduled history binds the selected workspace, streams while running and closes with the run', async t => {
+  const { db } = await cloudFixture(t)
+  const workspace = db.createWorkspace(employee, { name: '共享工作区' })
+  const task = db.createTask(employee, definition({ workspaceId: workspace.id }))
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  assert.equal(run.cloudWorkspaceId, workspace.id)
+  const claim = db.claimRun(employee, employee)!
+  assert.equal(claim.workspace?.id, workspace.id)
+  assert.equal(claim.session?.source, 'scheduled-task')
+  assert.equal(claim.session?.runId, run.id)
+  assert.equal(claim.session?.taskId, task.id)
+  assert.equal(claim.run.cloudSessionId, claim.session?.id)
+  const id = claim.session!.id
+  db.progressRun(employee, run.id, { status: 'running', startedAt: at, sessionId: 'dsh-session' })
+  assert.equal(db.session(employee, id).instanceSessionId, 'dsh-session')
+  assert.throws(() => db.promptSession(employee, id, { prompt: 'unsafe extra turn', mode: 'queue' }))
+  assert.throws(() => db.cancelSession(employee, id))
+  assert.throws(() => db.closeSession(employee, id))
+  assert.throws(() => db.reportSessionStatus(employee, id, { state: 'closed', errorCode: '', errorMessage: '' }))
+  db.appendSessionFrames(employee, id, [{ seq: 1, at, frame: { type: 'snapshot', records: [] } }])
+  assert.equal(db.listSessions(employee)[0]?.id, id)
+  assert.equal(db.listSessions('another-user').length, 0)
+  assert.throws(() => db.sessionEvents('another-user', id, 0, 200))
+  db.completeRun(employee, run.id, { status: 'succeeded', finishedAt: at, summary: 'done', errorCode: '' })
+  assert.equal(db.session(employee, id).state, 'closed')
+  assert.equal(db.sessionEvents(employee, id, 0, 200).events.length, 1)
+  assert.throws(() => db.appendSessionFrames(employee, id, [{ seq: 2, at, frame: {} }]))
+})
+
+test('legacy runs reuse a stable registered task directory; each retry has a distinct fenced history', async t => {
+  const { db, clock } = await cloudFixture(t)
+  const task = db.createTask(employee, definition())
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  const first = db.claimRun(employee, employee)!
+  assert.equal(first.workspace?.relativePath, task.id)
+  assert.equal(first.workspace?.name, task.name)
+  assert.equal(db.workspace(employee, first.run.cloudWorkspaceId!).id, first.workspace?.id)
+  clock.advance(CLAIM_LEASE_MS)
+  assert.throws(() => db.appendSessionFrames(employee, first.session!.id, [{ seq: 1, at, frame: {} }]))
+  db.advance()
+  const second = db.claimRun(employee, employee)!
+  assert.equal(second.workspace?.id, first.workspace?.id)
+  assert.notEqual(second.session?.id, first.session?.id)
+  assert.equal(db.session(employee, first.session!.id).state, 'failed')
+  assert.throws(() => db.appendSessionFrames(employee, first.session!.id, [{ seq: 1, at, frame: {} }]))
+  db.completeRun(employee, run.id, { status: 'cancelled', finishedAt: at, summary: '', errorCode: 'cancelled' })
+  db.enqueueRun(employee, task.id, 'manual')
+  assert.equal(db.claimRun(employee, employee)?.workspace?.id, first.workspace?.id)
+})
+
+test('task workspaces are owner scoped, remain bound for queued runs and cannot be deleted while referenced', async t => {
+  const { db } = await cloudFixture(t)
+  const workspace = db.createWorkspace(employee, { name: 'owned' })
+  assert.throws(() => db.createTask('other', definition({ workspaceId: workspace.id })))
+  const task = db.createTask(employee, definition({ workspaceId: workspace.id }))
+  assert.throws(() => db.updateTask('other', task.id, 1, definition({ workspaceId: workspace.id })))
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  db.updateTask(employee, task.id, 1, definition())
+  assert.equal(db.run(employee, run.id).cloudWorkspaceId, workspace.id)
+  assert.throws(() => db.deleteWorkspace(employee, workspace.id))
+})
+
+test('run list combines bounded search and statuses with owner scoping and exact totals', async t => {
+  const { db } = await cloudFixture(t)
+  const task = db.createTask(employee, definition({ name: 'Report 100%_test' }))
+  const other = db.createTask(employee, definition({ name: 'Report 100xxxx' }))
+  const first = db.enqueueRun(employee, task.id, 'manual')
+  db.enqueueRun(employee, other.id, 'manual')
+  db.cancelRun(employee, first.id)
+  const query = RunListQuerySchema.parse({ search: '100%_', statuses: 'cancelled,succeeded' })
+  assert.deepEqual(db.listRuns(employee, query).runs.map(run => run.id), [first.id])
+  assert.equal(db.listRuns(employee, query).total, 1)
+  assert.equal(db.listRuns('other', query).total, 0)
+  assert.equal(RunListQuerySchema.safeParse({ statuses: 'unknown' }).success, false)
+})
+
+test('schema 2 indexes legacy completed logs without waking an executor; opening queues one idempotent cold export', async t => {
+  const { db, root, clock, orchestrator } = await cloudFixture(t)
+  const { DatabaseSync } = await import('node:sqlite')
+  const { CloudDatabase } = await import('../server/cloud/database.js')
+  const path = await import('node:path')
+  const task = db.createTask(employee, definition())
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  const claimed = db.claimRun(employee, employee)!
+  db.completeRun(employee, run.id, { status: 'succeeded', finishedAt: at, summary: '', errorCode: '', sessionId: 'old-persisted-dsh-session' })
+  const raw = new DatabaseSync(path.join(root, 'cloud', 'cloud.sqlite'))
+  raw.prepare('DELETE FROM cloud_sessions WHERE id=?').run(claimed.session!.id)
+  raw.exec('DROP TABLE cloud_run_sessions; DROP TABLE cloud_run_workspaces; DELETE FROM schema_version WHERE version=3')
+  raw.close()
+  const upgraded = new CloudDatabase(path.join(root, 'cloud'), clock.now)
+  t.after(() => upgraded.close())
+  const indexed = upgraded.listSessions(employee)[0]!
+  assert.equal(indexed.source, 'scheduled-task')
+  assert.equal(indexed.historyStatus, 'not-loaded')
+  assert.equal(indexed.instanceSessionId, 'old-persisted-dsh-session')
+  assert.equal(upgraded.run(employee, run.id).cloudSessionId, indexed.id)
+  assert.equal(upgraded.claimCommand(employee), undefined)
+  assert.deepEqual(orchestrator.calls, [])
+  assert.throws(() => upgraded.requestRunSession('other', run.id))
+  assert.equal(upgraded.requestRunSession(employee, run.id).historyStatus, 'loading')
+  assert.equal(upgraded.requestRunSession(employee, run.id).id, indexed.id)
+  assert.throws(() => upgraded.appendSessionFrames(employee, indexed.id, [{ seq: 1, at, frame: {} }]), 'unclaimed imports cannot write')
+  const command = upgraded.claimCommand(employee)!
+  assert.equal(command.command.kind, 'session.history')
+  assert.equal(command.command.session?.instanceSessionId, indexed.instanceSessionId)
+  upgraded.appendSessionFrames(employee, indexed.id, [{ seq: 1, at, frame: { type: 'snapshot' } }])
+  upgraded.completeCommand(employee, command.command.id, { status: 'failed', errorCode: 'missing-log', message: '日志不可用' })
+  assert.equal(upgraded.session(employee, indexed.id).historyStatus, 'unavailable')
+  assert.equal(upgraded.requestRunSession(employee, run.id).historyStatus, 'loading')
+  const retry = upgraded.claimCommand(employee)!
+  assert.notEqual(retry.command.id, command.command.id)
+  assert.equal(retry.command.session?.lastSeq, 0, 'a retry clears the incomplete prefix before a fresh cold reconstruction')
+  upgraded.appendSessionFrames(employee, indexed.id, [{ seq: 1, at, frame: { type: 'snapshot' } }, { seq: 2, at, frame: { type: 'event' } }])
+  upgraded.completeCommand(employee, retry.command.id, { status: 'done', errorCode: '', message: '' })
+  assert.equal(upgraded.requestRunSession(employee, run.id).historyStatus, 'ready')
+  assert.equal(upgraded.claimCommand(employee), undefined)
+  assert.equal(upgraded.sessionEvents(employee, indexed.id, 0, 200).events.length, 2)
+})
+
+test('legacy workspace registration tolerates an existing user-created name and retention removes linked run histories', async t => {
+  const { db, clock } = await cloudFixture(t)
+  const task = db.createTask(employee, definition())
+  db.createWorkspace(employee, { name: task.name })
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  const claim = db.claimRun(employee, employee)!
+  assert.equal(claim.workspace?.name, `${task.name} (2)`)
+  db.completeRun(employee, run.id, { status: 'succeeded', finishedAt: at, summary: '', errorCode: '' })
+  clock.advance(8 * 24 * 60 * 60_000)
+  db.maintain()
+  assert.throws(() => db.session(employee, claim.session!.id))
+  assert.equal(db.workspace(employee, claim.workspace!.id).id, claim.workspace!.id)
+})
+
+test('opening schema 3 corrects only exact legacy automatic names and preserves paths, custom names and idempotency', async t => {
+  const { db, root, clock, orchestrator } = await cloudFixture(t)
+  const { DatabaseSync } = await import('node:sqlite')
+  const { CloudDatabase } = await import('../server/cloud/database.js')
+  const path = await import('node:path')
+  const task = db.createTask(employee, definition({ name: '周报/渠道:复盘' }))
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  const customTask = db.createTask(employee, definition({ name: '原任务名称' }))
+  const customRun = db.enqueueRun(employee, customTask.id, 'manual')
+  const raw = new DatabaseSync(path.join(root, 'cloud', 'cloud.sqlite'))
+  raw.prepare('UPDATE cloud_workspaces SET name=? WHERE id=?').run(`定时任务 ${task.id}`, run.cloudWorkspaceId!)
+  raw.prepare('UPDATE cloud_workspaces SET name=? WHERE id=?').run('我的长期文件', customRun.cloudWorkspaceId!)
+  raw.close()
+  const collision = db.createWorkspace(employee, { name: '周报 渠道 复盘' })
+  const userNamed = db.createWorkspace(employee, { name: `定时任务 ${customTask.id}` })
+  clock.advance(1_000)
+  const upgraded = new CloudDatabase(path.join(root, 'cloud'), clock.now)
+  const corrected = upgraded.workspace(employee, run.cloudWorkspaceId!)
+  assert.equal(corrected.name, '周报 渠道 复盘 (2)')
+  assert.equal(corrected.relativePath, task.id)
+  assert.equal(upgraded.run(employee, run.id).cloudWorkspaceId, corrected.id)
+  assert.equal(upgraded.workspace(employee, customRun.cloudWorkspaceId!).name, '我的长期文件')
+  assert.equal(upgraded.workspace(employee, userNamed.id).name, userNamed.name)
+  assert.equal(upgraded.workspace(employee, collision.id).name, collision.name)
+  assert.deepEqual(orchestrator.calls, [])
+  upgraded.close()
+  clock.advance(1_000)
+  const reopened = new CloudDatabase(path.join(root, 'cloud'), clock.now)
+  assert.deepEqual(reopened.workspace(employee, corrected.id), corrected)
+  reopened.close()
+})
+
+test('legacy display names stay valid and unique for long or path-like task names', async t => {
+  const { db } = await cloudFixture(t)
+  const names = ['长'.repeat(80), '长'.repeat(80), ' // : ', '.', 'a'.repeat(63) + '😀']
+  const expected = ['长'.repeat(64), '长'.repeat(60) + ' (2)', '定时任务', '定时任务 (2)', 'a'.repeat(63)]
+  for (let index = 0; index < names.length; index++) {
+    const task = db.createTask(employee, definition({ name: names[index] }))
+    const run = db.enqueueRun(employee, task.id, 'manual')
+    const workspace = db.workspace(employee, run.cloudWorkspaceId!)
+    assert.equal(workspace.name, expected[index])
+    assert.equal(workspace.relativePath, task.id)
+  }
+})
+
+
+test('incomplete live relay is visible and reopens through a clean cold history export', async t => {
+  const { db } = await cloudFixture(t)
+  const task = db.createTask(employee, definition())
+  const run = db.enqueueRun(employee, task.id, 'manual')
+  const claim = db.claimRun(employee, employee)!
+  db.appendSessionFrames(employee, claim.session!.id, [{ seq: 1, at, frame: { type: 'snapshot' } }])
+  db.completeRun(employee, run.id, { status: 'succeeded', finishedAt: at, summary: 'model done', errorCode: '', sessionId: 'durable', historyComplete: false })
+  assert.equal(db.run(employee, run.id).status, 'succeeded')
+  assert.equal(db.session(employee, claim.session!.id).historyStatus, 'unavailable')
+  assert.equal(db.session(employee, claim.session!.id).errorCode, 'history-incomplete')
+  const retried = db.requestRunSession(employee, run.id)
+  assert.equal(retried.lastSeq, 0)
+  assert.equal(retried.historyStatus, 'loading')
+  assert.equal(db.claimCommand(employee)?.command.kind, 'session.history')
+})

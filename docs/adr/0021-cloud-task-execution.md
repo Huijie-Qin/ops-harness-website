@@ -11,7 +11,7 @@
 ## 决策
 
 - **角色**：三方分工固定为 ① 官网 = 控制面 + 编排器；② 云端实例内的执行器插件（产品仓库 `@dsh-ops/cloud-executor`）= 只出站的工作进程；③ 本地云端任务插件（产品仓库 `@dsh-ops/cloud-tasks`）= 界面。官网拥有任务定义与计划（权威）、运行队列与租约、产物、令牌、实例状态；不解释任务内容，不调用模型。
-- **契约**：三方共用产品仓库 `packages/shared/cloud-task-contract`（`@dsh-ops/cloud-task-contract`，contractVersion 1；第二期升级到包版本 0.2.1）。官网只从 vendor 制品导入 schema、常量和路由表，所有请求/响应用 strict schema 校验，错误码只用契约中的 `errorCodes`。官网不另维护一份协议实现；契约缺口先在官网侧用本地 zod 扩展绕过并在报告中登记，再回到产品仓库修改源包。
+- **契约**：三方共用产品仓库 `packages/shared/cloud-task-contract`（`@dsh-ops/cloud-task-contract`，contractVersion 1；当前包版本 0.3.0）。官网只从 vendor 制品导入 schema、常量和路由表，所有请求/响应用 strict schema 校验，错误码只用契约中的 `errorCodes`。官网不另维护一份协议实现；协议变更先在产品共享契约包中实现，再生成官网消费的 vendor 制品。
 - **身份与凭证**：身份键是 WeLink 工号（与 tracking `users` 表 `issuer=welink` 对齐）。管理员在后台按工号签发个人访问令牌（`kind=user`），明文只在签发响应中出现一次，服务端只存 sha256；可到期、可吊销。执行器令牌（`kind=executor`）由官网在每次拉起实例时签发并通过环境变量注入，停止实例即吊销。自报工号不作为凭证；两类令牌不能互换路由。
 - **每用户实例**：实例以工号命名（容器 `dsh-ops-cloud-<工号>`），数据目录 `<cloud.directory>/instances/<工号>/home` 作为该实例的 `DSH_HOME` 卷。实例由计划器按需拉起（有排队/运行中的运行）并在空闲 `idleStopMinutes` 后停止；停止的容器会被删除后重建，以便新令牌进入环境；卷保留。
 - **执行器只出站**：实例不开放任何入站端口；执行器通过 `/api/cloud/v1/executor/*` 心跳（上报可用专家/技能目录、版本、仍在执行的运行）、领取（原子把本用户最早的 queued 运行改为 claimed，租约 `CLAIM_LEASE_MS`）、上报进度（续租）、上传产物（octet-stream，sha256 校验后落盘）、上报完成。用户接口与执行器接口都拒绝浏览器来源（有 `Origin` 或 `sec-fetch-site` 即 403），与 tracking 一致。
@@ -34,7 +34,7 @@
 
 真实 Docker 5.15 内核的联调探针中，DSH 原生沙箱不可用时拒绝执行 Bash；安装 bubblewrap 后，Docker 默认 seccomp 与 `/proc` mount 约束仍阻止其建立内部沙箱。因此增加显式的 `cloud.docker.sandbox: native | bubblewrap`，默认 `native` 保留现有 Docker 默认与 DSH 失败即拒绝行为，只有部署人员主动选择才启用兼容配置。
 
-`bubblewrap` 使用受控的 Moby v24.0.2 默认 seccomp 快照，仅追加 `clone`、`unshare`、`mount`、`umount2`、`pivot_root` 五项 allow（探针逐一移除均不能启动）；来源与 SHA-256 固定在 `server/cloud/docker-sandbox.ts`，完整 Apache-2.0 许可证及来源登记随源码和生产构建分发。Docker 创建请求同时固定 `CapDrop: [ALL]`、`Privileged: false`、`no-new-privileges=true`、只读 rootfs、`/tmp` 的 128 MiB tmpfs（`rw,exec,nosuid,nodev,size=128m,mode=1777`）；移除 Docker 默认 `/proc/*` masked/readonly 项，保留 `MaskedPaths: [/sys/firmware]`。该模式默认显式使用 `1000:1000`，也可配置其他非 root `docker.user`，不依赖任意镜像的默认 USER。不接收任意 seccomp 文件、内联规则或 `unconfined`。
+`bubblewrap` 使用受控的 Moby v24.0.2 默认 seccomp 快照，仅追加 `clone`、`unshare`、`mount`、`umount2`、`pivot_root`、`chroot` 六项 allow（前五项为 DSH bwrap 需求，2026-09-26 Chromium 沙箱探针补充证明需要 `chroot`）；来源与 SHA-256 固定在 `server/cloud/docker-sandbox.ts`，完整 Apache-2.0 许可证及来源登记随源码和生产构建分发。Docker 创建请求同时固定 `CapDrop: [ALL]`、`Privileged: false`、`no-new-privileges=true`、只读 rootfs、`/tmp` 的 128 MiB tmpfs（`rw,exec,nosuid,nodev,size=128m,mode=1777`）；移除 Docker 默认 `/proc/*` masked/readonly 项，保留 `MaskedPaths: [/sys/firmware]`。该模式默认显式使用 `1000:1000`，也可配置其他非 root `docker.user`，不依赖任意镜像的默认 USER。不接收任意 seccomp 文件、内联规则或 `unconfined`。
 
 `/tmp` 显式允许 `exec` 是 DSH 官方原生模块加载器的兼容要求：`node-addon-native-custom-loader` 将已校验的预编译模块复制到缓存，再由 `dlopen` 加载；Docker tmpfs 默认 `noexec` 会让映射失败，并使依赖该加载器的产品插件无法载入。真实同镜像探针仅切换此项即从加载失败恢复；保留 `nosuid`、`nodev`、容量限制与全部容器权限约束，不修改 `node_modules` 或引入私有缓存开关。DSH 内部 bubblewrap 仍为任务建立独立沙箱。
 
@@ -74,3 +74,17 @@
 - 2026-09-25 本轮更新：在 macOS 的 Docker 24.0.2（Linux 5.15.49、aarch64）完成真实镜像构建、当前编排器创建与删除实例、bubblewrap 容器约束、每用户独立 bridge 的跨租户直接 IP HTTP 拒绝、自身 loopback 访问和 `host-gateway` 宿主 HTTP 访问验证。
 - 真实 DeepSeek 模型的 Bash 任务在 6.371 秒完成，已有实际 `tool/call` 与结果记录，并下载产物断言工作区可写、既存工作区外目录不可写、命令子进程环境不含模型 Key 或执行器令牌。使用确定性模拟模型另行通过 UI 运行中取消、排队取消、60.049 秒超时、官网短暂重启后原容器内同一运行续跑、本地 Runtime 关闭后的单次计划执行；模拟结果不冒充真实模型工具调用。
 - 最后补充专家必要工具可用性判断后的产品最终镜像 `sha256:8293475f929e846652ef54f0650875f4dd02bb12d7a341e68c95943af28f6884` 已重建并重复通过真实 Bash 验收：运行 `cr_650d49a81d8a3567323a1a13a7a706e7` 耗时 3.958 秒，新会话记录包含 Bash `tool/call` 与 `tool/result` 验收标记，下载文件的工作区可写、外目录拒绝、模型 Key 与执行器令牌不可见四项断言再次通过。证据见产品仓库的 [Docker 端到端验收报告](../../../ops-harness/docs/qa/cloud-tasks-docker-e2e-2026-09-25.md)（本地并列检出路径）。此结果不替代生产 Linux/x64 主机与 bind mount 权限验收；出站白名单、模型出口代理和持久盘配额仍未实现或验证。
+
+## 2026-09-26：统一会话历史与旧日志冷读取
+
+协议制品升级为 0.3.0（路径仍为 `/api/cloud/v1`），SQLite schema 3 仅增加 run/workspace 和 run/session 的关联表，事务内同时为已保留且已有实例 sessionId 的旧终态 run 建立会话索引，不唤醒实例。新任务可指定已有云工作区；省略时为旧任务登记稳定 `cw_` 标识，继续使用原 `ct_<taskId>` 目录，保留既有文件。自动工作区显示任务名称，按工作区字符与长度规则规范化，重名加序号；启动时只校正稳定标识、原目录及精确旧自动名同时匹配的记录，不覆盖用户命名。工作区归属在任务保存与运行绑定时校验，有引用的任务/未结束运行会阻止工作区删除。
+
+每次新 run claim 创建一条 `source=scheduled-task` 的只读 CloudSession，记录 `runId/taskId`；run 对外带 `cloudWorkspaceId/cloudSessionId`。执行器在第一条模型输入前通过公开 Host 回调建立 DSH follow，转发原生事件；run 完成时统一关闭该历史。租约失效会封闭旧 attempt，再次领取产生独立历史，旧帧不能污染重试。用户的 prompt/cancel/close 和执行器 session status 接口都拒绝调度历史，任务取消仍走 run。
+
+`POST /runs/:id/session` 幂等打开历史；旧日志从 `not-loaded` 转 `loading` 并排队 `session.history`。执行器通过公开 `sessionQuery.observeSession` 读 header/cursor 并释放观察，再用 `sessionController.page` 读取完整日志；不启动 Agent、不 follow、不发送 prompt。官网以命令租约授权导入，确认完成后 `historyStatus=ready`，缺失/损坏/超限为 `unavailable`，用户可重试；不把缺失日志伪装为已成功回放。导入限制为 64 MiB / 49,999 条原生记录，单帧上限和动态事件分页沿用第二期边界。旧任务自动登记的工作区不因命名工作区创建配额而丢弃已有目录。
+
+Chromium 的真实 Linux Docker probe 在原五 syscall profile 下报 `sys_chroot` 失败，仅增加 `chroot` 后通过官方扩展连接、页面观察、填写和点击；未使用 `--no-sandbox`。变更只影响新创建的 bubblewrap 容器，保留 UID 1000、CapDrop ALL、no-new-privileges、只读 root、128 MiB `/tmp` 以及用户独立网络。该兼容不实现公网出口白名单、模型代理或磁盘 quota，也不代替生产 Linux/x64 验收。
+
+新 run 的尾帧在提交 complete 前等待官网确认；取消、租约失效或卸载可打断等待，执行器以可选 `historyComplete=false` 标明未完成回传，官网将历史显示为 unavailable，保留运行本身的真实结果。再次打开会先清空不完整帧，再按完整原生冷日志重建；客户端必须根据返回的 lastSeq=0 丢弃旧前缀缓存。工具能力目录从 Tool Market 公开快照与装配层 disabledTools 投影，浏览器先做有界只读就绪检查，不发布控制器诊断文本或登录身份。
+
+本轮在最终完整产品镜像 `0f54d3e6c025ec8d15d8cb0baa26c4036416a636ac5fb729bcc9b8816b9cf4b2` 上通过真实 DeepSeek 两轮会话、同工作区定时任务、实时完整尾帧与调度历史只读验证。仅对独立 QA 运行移除历史索引后，公开冷读取接口恢复全部 29 条持久事件；模拟日志缺失后重试恢复也通过，原生日志哈希未变且未创建额外原生会话。验收范围及证据见[会话历史 Docker 验收记录](../qa/cloud-history-docker-e2e-2026-09-26.md)，不替代上述生产部署边界。
