@@ -1,6 +1,2 @@
-import type { z } from 'zod'
-import type { InstanceStateSchema, InstanceStatusSchema } from '@dsh-ops/cloud-task-contract'
-
-// The contract exports the schemas but not these inferred types; derive them locally instead of forking the package.
-export type InstanceState = z.infer<typeof InstanceStateSchema>
-export type InstanceStatus = z.infer<typeof InstanceStatusSchema>
+// Contract 0.2.0 exports these inferred types itself; the local aliases stay so phase-1 imports keep working.
+export type { InstanceState, InstanceStatus } from '@dsh-ops/cloud-task-contract'

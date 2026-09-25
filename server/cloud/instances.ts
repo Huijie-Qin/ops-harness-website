@@ -96,6 +96,7 @@ export class InstanceManager {
     if (record && (record.state === 'running' || record.state === 'starting')) {
       // We believed it alive and the backend says it is gone.
       this.db.revokeExecutorTokens(employeeId)
+      this.abandonSessions(employeeId, 'instance-stopped', 'the cloud instance exited')
       if (!live.error) { this.db.updateInstance(employeeId, { state: 'stopped', backendRef: null, launchUrl: null, lastHeartbeatAt: null }); return 'launch' }
       const count = (this.failures.get(employeeId) ?? 0) + 1
       this.failures.set(employeeId, count)
@@ -106,10 +107,16 @@ export class InstanceManager {
     }
     return 'launch'
   }
+  /** Sessions that were open in an instance that is gone can no longer be reached; close them with the reason. */
+  private abandonSessions(employeeId: string, errorCode: string, message: string) {
+    const closed = this.db.closeSessionsForInstance(employeeId, errorCode, message)
+    if (closed.length) this.options.log?.(`instance ${employeeId}: closed ${closed.length} session(s) (${errorCode})`)
+  }
   private fail(employeeId: string, message: string) {
     const count = (this.failures.get(employeeId) ?? 0) + 1
     this.failures.set(employeeId, count)
     this.db.revokeExecutorTokens(employeeId)
+    this.abandonSessions(employeeId, 'instance-failed', 'the cloud instance failed')
     this.db.updateInstance(employeeId, { state: 'error', lastHeartbeatAt: null, lastError: message })
     this.options.log?.(`instance ${employeeId} failed (${count} in a row, backing off): ${firstLine(message)}`)
   }
@@ -122,6 +129,7 @@ export class InstanceManager {
   private async stopInstance(employeeId: string): Promise<InstanceStatus> {
     this.db.updateInstance(employeeId, { state: 'stopping' })
     this.failures.delete(employeeId)
+    this.abandonSessions(employeeId, 'instance-stopped', 'the cloud instance was stopped')
     try {
       await this.orchestrator.stop(employeeId)
       this.db.updateInstance(employeeId, { state: 'stopped', backendRef: null, launchUrl: null, lastHeartbeatAt: null, lastError: null })

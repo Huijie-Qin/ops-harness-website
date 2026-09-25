@@ -2,23 +2,35 @@ import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
 import {
-  CLOUD_API_BASE, CONTRACT_VERSION, CatalogResponseSchema, ClaimRequestSchema, ClaimedRunSchema, EmployeeIdSchema, ExecutorHeartbeatSchema,
-  HeartbeatResponseSchema, MAX_ARTIFACT_FILES, MeResponseSchema, RunCompletionSchema, RunIdSchema, RunListQuerySchema, RunListResponseSchema,
-  RunProgressSchema, RunResponseSchema, Sha256Schema, TaskIdSchema, TaskListResponseSchema, TaskResponseSchema, TaskStateRequestSchema,
-  UpdateTaskRequestSchema, bearerToken, type CloudErrorCode,
+  ARTIFACT_FILE_COUNT_HEADER, ARTIFACT_SHA256_HEADER, CLOUD_API_BASE, CONTRACT_VERSION, CatalogResponseSchema, ClaimRequestSchema, ClaimedRunSchema,
+  CommandClaimResponseSchema, CommandIdSchema, CommandResultSchema, EmployeeIdSchema, ExecutorHeartbeatSchema, HeartbeatResponseSchema, MAX_ARTIFACT_FILES,
+  MeResponseSchema, RunCompletionSchema, RunIdSchema, RunListQuerySchema, RunListResponseSchema, RunProgressSchema, RunResponseSchema,
+  SessionEventsQuerySchema, SessionEventsResponseSchema, SessionFrameBatchResponseSchema, SessionFrameBatchSchema, SessionIdSchema, SessionListResponseSchema,
+  SessionPromptRequestSchema, SessionResponseSchema, SessionStatusReportSchema, Sha256Schema, TaskIdSchema, TaskListResponseSchema, TaskResponseSchema,
+  TaskStateRequestSchema, UpdateTaskRequestSchema, WorkspaceIdSchema, WorkspaceListResponseSchema, WorkspaceResponseSchema, bearerToken, terminalSessionStates,
+  type CloudErrorCode,
 } from '@dsh-ops/cloud-task-contract'
 import type { AdminHandler } from '../admin-files.js'
 import { GuideError } from '../guide-store.js'
+import { workspaceSnapshotKey } from './artifacts.js'
 import type { CloudRuntime } from './index.js'
 import { CloudError, describeFailure } from './errors.js'
 import { CloudEmployeeIdSchema } from './identity.js'
 
 export type CloudHttpOptions = { executorPollMs: number; log?: ((line: string) => void) | undefined; now?: () => number }
 const MAX_JSON_BYTES = 64 * 1024
-const REQUESTS_PER_MINUTE = 300
+/** A frame batch may carry up to 200 frames of 512 KiB each in theory; executors flush far smaller batches, and this bounds one request. */
+export const MAX_FRAME_BATCH_BYTES = 8 * 1024 * 1024
+/** Per-token budgets: a user polling an active session and an executor relaying frames for several sessions both exceed the phase-1 300/min. */
+const REQUESTS_PER_MINUTE = { user: 600, executor: 1200 } as const
 const FAILED_AUTH_PER_MINUTE = 120
 const MAX_INFLIGHT = 64
-type RouteName = 'me' | 'catalog' | 'tasks' | 'task' | 'taskState' | 'taskRun' | 'runs' | 'run' | 'runCancel' | 'runArtifact' | 'executorHeartbeat' | 'executorClaim' | 'executorProgress' | 'executorArtifact' | 'executorComplete'
+type RouteName =
+  | 'me' | 'catalog' | 'tasks' | 'task' | 'taskState' | 'taskRun' | 'runs' | 'run' | 'runCancel' | 'runArtifact'
+  | 'executorHeartbeat' | 'executorClaim' | 'executorProgress' | 'executorArtifact' | 'executorComplete'
+  | 'workspaces' | 'workspace' | 'workspaceSnapshot' | 'workspaceSnapshotArchive'
+  | 'sessions' | 'session' | 'sessionPrompt' | 'sessionCancel' | 'sessionClose' | 'sessionEvents'
+  | 'executorCommandClaim' | 'executorCommandResult' | 'executorSessionFrames' | 'executorSessionStatus' | 'executorWorkspaceSnapshot'
 const ID = '([A-Za-z0-9_-]{1,64})'
 const routes: { name: RouteName; methods: string[]; pattern: RegExp }[] = [
   { name: 'me', methods: ['GET'], pattern: /^\/me$/ },
@@ -36,14 +48,33 @@ const routes: { name: RouteName; methods: string[]; pattern: RegExp }[] = [
   { name: 'executorProgress', methods: ['POST'], pattern: new RegExp(`^/executor/runs/${ID}/progress$`) },
   { name: 'executorArtifact', methods: ['PUT'], pattern: new RegExp(`^/executor/runs/${ID}/artifact$`) },
   { name: 'executorComplete', methods: ['POST'], pattern: new RegExp(`^/executor/runs/${ID}/complete$`) },
+  // Phase 2 — workspaces and sessions (user token)
+  { name: 'workspaces', methods: ['GET', 'POST'], pattern: /^\/workspaces$/ },
+  { name: 'workspace', methods: ['GET', 'DELETE'], pattern: new RegExp(`^/workspaces/${ID}$`) },
+  { name: 'workspaceSnapshot', methods: ['POST'], pattern: new RegExp(`^/workspaces/${ID}/snapshot$`) },
+  { name: 'workspaceSnapshotArchive', methods: ['GET'], pattern: new RegExp(`^/workspaces/${ID}/snapshot/archive$`) },
+  { name: 'sessions', methods: ['GET', 'POST'], pattern: /^\/sessions$/ },
+  { name: 'session', methods: ['GET'], pattern: new RegExp(`^/sessions/${ID}$`) },
+  { name: 'sessionPrompt', methods: ['POST'], pattern: new RegExp(`^/sessions/${ID}/prompt$`) },
+  { name: 'sessionCancel', methods: ['POST'], pattern: new RegExp(`^/sessions/${ID}/cancel$`) },
+  { name: 'sessionClose', methods: ['POST'], pattern: new RegExp(`^/sessions/${ID}/close$`) },
+  { name: 'sessionEvents', methods: ['GET'], pattern: new RegExp(`^/sessions/${ID}/events$`) },
+  // Phase 2 — command queue and relay (executor token)
+  { name: 'executorCommandClaim', methods: ['POST'], pattern: /^\/executor\/commands\/claim$/ },
+  { name: 'executorCommandResult', methods: ['POST'], pattern: new RegExp(`^/executor/commands/${ID}/result$`) },
+  { name: 'executorSessionFrames', methods: ['POST'], pattern: new RegExp(`^/executor/sessions/${ID}/frames$`) },
+  { name: 'executorSessionStatus', methods: ['POST'], pattern: new RegExp(`^/executor/sessions/${ID}/status$`) },
+  { name: 'executorWorkspaceSnapshot', methods: ['PUT'], pattern: new RegExp(`^/executor/workspaces/${ID}/snapshot$`) },
 ]
 const IssueTokenSchema = z.object({ employeeId: CloudEmployeeIdSchema, label: z.string().trim().max(80).default(''), expiresInDays: z.number().int().min(1).max(3650).optional() }).strict()
-const AdminRunsQuerySchema = z.object({ employeeId: EmployeeIdSchema.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).strict()
+const AdminListQuerySchema = z.object({ employeeId: EmployeeIdSchema.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).strict()
+const AdminWorkspacesQuerySchema = z.object({ employeeId: EmployeeIdSchema.optional() }).strict()
 
 function json(res: ServerResponse, value: unknown, status = 200) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
   res.end(JSON.stringify(value))
 }
+function empty(res: ServerResponse, status = 204) { res.writeHead(status, { 'Cache-Control': 'no-store' }); res.end() }
 async function readJson(req: IncomingMessage, limit = MAX_JSON_BYTES): Promise<unknown> {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new CloudError('INVALID_REQUEST', 415, 'application/json required')
   if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new CloudError('INVALID_REQUEST', 415, 'content-encoding not supported')
@@ -61,8 +92,15 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   if (!result.success) { const issue = result.error.issues[0]; throw new CloudError('INVALID_REQUEST', 400, issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'invalid request') }
   return result.data
 }
-const taskId = (value: string) => { const parsed = TaskIdSchema.safeParse(value); if (!parsed.success) throw new CloudError('NOT_FOUND', 404); return parsed.data }
-const runId = (value: string) => { const parsed = RunIdSchema.safeParse(value); if (!parsed.success) throw new CloudError('NOT_FOUND', 404); return parsed.data }
+const identifier = (schema: z.ZodType<string>) => (value: string) => { const parsed = schema.safeParse(value); if (!parsed.success) throw new CloudError('NOT_FOUND', 404); return parsed.data }
+const taskId = identifier(TaskIdSchema), runId = identifier(RunIdSchema), workspaceId = identifier(WorkspaceIdSchema), sessionId = identifier(SessionIdSchema), commandId = identifier(CommandIdSchema)
+/** Upload headers shared by run artifacts and workspace snapshots. */
+function artifactHeaders(req: IncomingMessage) {
+  return {
+    sha256: parse(Sha256Schema, String(req.headers[ARTIFACT_SHA256_HEADER] ?? '')),
+    fileCount: parse(z.coerce.number().int().min(0).max(MAX_ARTIFACT_FILES), req.headers[ARTIFACT_FILE_COUNT_HEADER] ?? 0),
+  }
+}
 
 export function createCloudHandlers(runtime: CloudRuntime | undefined, options: CloudHttpOptions) {
   const now = options.now ?? Date.now
@@ -86,6 +124,8 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
     if (res.headersSent) { res.destroy(); return }
     json(res, { error: 'INTERNAL' satisfies CloudErrorCode }, 500)
   }
+  /** Wake the user's instance now instead of waiting for the next scheduler pass (fire and forget). */
+  const wake = (cloud: CloudRuntime, employeeId: string) => { void cloud.instances.ensureRunning(employeeId).catch(error => options.log?.(`wake ${employeeId} failed: ${describeFailure(error)}`)) }
 
   const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
     if (url.pathname !== CLOUD_API_BASE && !url.pathname.startsWith(`${CLOUD_API_BASE}/`)) return false
@@ -101,8 +141,8 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
       const token = bearerToken(req.headers.authorization)
       if (!token) throw new CloudError('UNAUTHORIZED', 401)
       const key = createHash('sha256').update(token).digest('hex')
-      if (limited(key, REQUESTS_PER_MINUTE) || inflight >= MAX_INFLIGHT) throw new CloudError('RATE_LIMITED', 429)
       const kind = match.route.name.startsWith('executor') ? 'executor' : 'user'
+      if (limited(key, REQUESTS_PER_MINUTE[kind]) || inflight >= MAX_INFLIGHT) throw new CloudError('RATE_LIMITED', 429)
       const principal = runtime.db.authenticate(token, kind)
       if (!principal) {
         if (now() - failedAuth.window > 60_000) failedAuth = { window: now(), count: 0 }
@@ -133,7 +173,7 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
       case 'task': {
         const id = taskId(params[0]!)
         if (req.method === 'GET') return json(res, TaskResponseSchema.parse({ task: db.task(employeeId, id) }))
-        if (req.method === 'DELETE') { db.deleteTask(employeeId, id); res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return }
+        if (req.method === 'DELETE') { db.deleteTask(employeeId, id); return empty(res) }
         const update = parse(UpdateTaskRequestSchema, await readJson(req))
         return json(res, TaskResponseSchema.parse({ task: db.updateTask(employeeId, id, update.expectedRevision, update.definition) }))
       }
@@ -143,8 +183,7 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
       }
       case 'taskRun': {
         const run = db.enqueueRun(employeeId, taskId(params[0]!), 'manual')
-        // Wake the instance now instead of waiting for the next scheduler pass.
-        void cloud.instances.ensureRunning(employeeId).catch(error => options.log?.(`wake ${employeeId} failed: ${describeFailure(error)}`))
+        wake(cloud, employeeId)
         return json(res, RunResponseSchema.parse({ run }), 201)
       }
       case 'runs': {
@@ -170,20 +209,100 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
         const claim = parse(ClaimRequestSchema, await readJson(req))
         if (claim.instanceId !== employeeId) throw new CloudError('FORBIDDEN', 403, 'instanceId does not match the executor token')
         const claimed = db.claimRun(employeeId, claim.instanceId)
-        if (!claimed) { res.writeHead(204, { 'Cache-Control': 'no-store' }); res.end(); return }
+        if (!claimed) return empty(res)
         return json(res, ClaimedRunSchema.parse(claimed))
       }
       case 'executorProgress': return json(res, RunResponseSchema.parse({ run: db.progressRun(employeeId, runId(params[0]!), parse(RunProgressSchema, await readJson(req))) }))
       case 'executorArtifact': {
         const id = runId(params[0]!)
-        const sha256 = parse(Sha256Schema, String(req.headers['x-artifact-sha256'] ?? ''))
-        const fileCount = parse(z.coerce.number().int().min(0).max(MAX_ARTIFACT_FILES), req.headers['x-artifact-file-count'] ?? 0)
+        const { sha256, fileCount } = artifactHeaders(req)
         const current = db.run(employeeId, id)
         if (current.status !== 'claimed' && current.status !== 'running') throw new CloudError('INVALID_REQUEST', 409, `run is ${current.status}`)
         const received = await cloud.artifacts.receive(req, id, sha256)
         return json(res, RunResponseSchema.parse({ run: db.attachArtifact(employeeId, id, { size: received.size, sha256: received.sha256, fileCount }) }))
       }
       case 'executorComplete': return json(res, RunResponseSchema.parse({ run: db.completeRun(employeeId, runId(params[0]!), parse(RunCompletionSchema, await readJson(req))) }))
+
+      // ── Phase 2: workspaces ──
+      case 'workspaces': {
+        if (req.method === 'GET') return json(res, WorkspaceListResponseSchema.parse({ workspaces: db.listWorkspaces(employeeId) }))
+        const workspace = db.createWorkspace(employeeId, await readJson(req))
+        wake(cloud, employeeId)
+        return json(res, WorkspaceResponseSchema.parse({ workspace }), 201)
+      }
+      case 'workspace': {
+        const id = workspaceId(params[0]!)
+        if (req.method === 'GET') return json(res, WorkspaceResponseSchema.parse({ workspace: db.workspace(employeeId, id) }))
+        const { hadSnapshot } = db.deleteWorkspace(employeeId, id)
+        if (hadSnapshot) await cloud.artifacts.remove(workspaceSnapshotKey(id)).catch(error => options.log?.(`snapshot cleanup ${id} failed: ${describeFailure(error)}`))
+        return empty(res)
+      }
+      case 'workspaceSnapshot': {
+        const workspace = db.requestWorkspaceSnapshot(employeeId, workspaceId(params[0]!))
+        wake(cloud, employeeId)
+        return json(res, WorkspaceResponseSchema.parse({ workspace }), 202)
+      }
+      case 'workspaceSnapshotArchive': {
+        const workspace = db.workspace(employeeId, workspaceId(params[0]!))
+        if (!workspace.snapshot) throw new CloudError('NOT_FOUND', 404, 'workspace has no snapshot')
+        return cloud.artifacts.serve(req, res, workspaceSnapshotKey(workspace.id), workspace.snapshot)
+      }
+
+      // ── Phase 2: sessions ──
+      case 'sessions': {
+        if (req.method === 'GET') return json(res, SessionListResponseSchema.parse({ sessions: db.listSessions(employeeId) }))
+        const session = db.createSession(employeeId, await readJson(req))
+        wake(cloud, employeeId)
+        return json(res, SessionResponseSchema.parse({ session }), 201)
+      }
+      case 'session': return json(res, SessionResponseSchema.parse({ session: db.session(employeeId, sessionId(params[0]!)) }))
+      case 'sessionPrompt': {
+        const request = parse(SessionPromptRequestSchema, await readJson(req))
+        return json(res, SessionResponseSchema.parse({ session: db.promptSession(employeeId, sessionId(params[0]!), request) }), 202)
+      }
+      case 'sessionCancel': return json(res, SessionResponseSchema.parse({ session: db.cancelSession(employeeId, sessionId(params[0]!)) }))
+      case 'sessionClose': return json(res, SessionResponseSchema.parse({ session: db.closeSession(employeeId, sessionId(params[0]!)) }))
+      case 'sessionEvents': {
+        const id = sessionId(params[0]!)
+        const query = parse(SessionEventsQuerySchema, Object.fromEntries(url.searchParams))
+        let page = db.sessionEvents(employeeId, id, query.since, query.limit)
+        if (page.events.length === 0 && query.waitMs > 0 && !terminalSessionStates.includes(page.session.state)) {
+          // Park until the executor relays something or the session changes; the parked reader does not hold an inflight slot.
+          inflight--
+          try { await cloud.waiters.wait(id, query.waitMs, res) } finally { inflight++ }
+          if (res.destroyed || res.writableEnded) return
+          page = db.sessionEvents(employeeId, id, query.since, query.limit)
+        }
+        return json(res, SessionEventsResponseSchema.parse(page))
+      }
+
+      // ── Phase 2: executor command queue and relay ──
+      case 'executorCommandClaim': {
+        const claim = parse(ClaimRequestSchema, await readJson(req))
+        if (claim.instanceId !== employeeId) throw new CloudError('FORBIDDEN', 403, 'instanceId does not match the executor token')
+        const claimed = db.claimCommand(employeeId)
+        if (!claimed) return empty(res)
+        return json(res, CommandClaimResponseSchema.parse(claimed))
+      }
+      case 'executorCommandResult': {
+        db.completeCommand(employeeId, commandId(params[0]!), parse(CommandResultSchema, await readJson(req)))
+        return empty(res)
+      }
+      case 'executorSessionFrames': {
+        const batch = parse(SessionFrameBatchSchema, await readJson(req, MAX_FRAME_BATCH_BYTES))
+        return json(res, SessionFrameBatchResponseSchema.parse(db.appendSessionFrames(employeeId, sessionId(params[0]!), batch.events)))
+      }
+      case 'executorSessionStatus': {
+        const report = parse(SessionStatusReportSchema, await readJson(req))
+        return json(res, SessionResponseSchema.parse({ session: db.reportSessionStatus(employeeId, sessionId(params[0]!), report) }))
+      }
+      case 'executorWorkspaceSnapshot': {
+        const id = workspaceId(params[0]!)
+        const { sha256, fileCount } = artifactHeaders(req)
+        db.workspace(employeeId, id)
+        const received = await cloud.artifacts.receive(req, workspaceSnapshotKey(id), sha256)
+        return json(res, WorkspaceResponseSchema.parse({ workspace: db.setWorkspaceSnapshot(employeeId, id, { size: received.size, sha256: received.sha256, fileCount }) }))
+      }
     }
   }
 
@@ -213,8 +332,28 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
       if (stop) { context.method(req, ['POST']); context.json(res, { instance: await runtime.instances.stop(stop[1]!) }); return true }
       if (url.pathname === '/api/admin/cloud/runs') {
         context.method(req, ['GET'])
-        const query = parse(AdminRunsQuerySchema, Object.fromEntries(url.searchParams))
+        const query = parse(AdminListQuerySchema, Object.fromEntries(url.searchParams))
         context.json(res, { runs: db.adminRuns(query.employeeId, query.limit) })
+        return true
+      }
+      if (url.pathname === '/api/admin/cloud/sessions') {
+        context.method(req, ['GET'])
+        const query = parse(AdminListQuerySchema, Object.fromEntries(url.searchParams))
+        context.json(res, { sessions: db.adminSessions(query.employeeId, query.limit) })
+        return true
+      }
+      const close = /^\/api\/admin\/cloud\/sessions\/(cs_[0-9a-f]{32})\/close$/.exec(url.pathname)
+      if (close) { context.method(req, ['POST']); context.json(res, { session: db.adminCloseSession(close[1]!) }); return true }
+      if (url.pathname === '/api/admin/cloud/commands') {
+        context.method(req, ['GET'])
+        const query = parse(AdminListQuerySchema, Object.fromEntries(url.searchParams))
+        context.json(res, { commands: db.adminCommands(query.employeeId, query.limit) })
+        return true
+      }
+      if (url.pathname === '/api/admin/cloud/workspaces') {
+        context.method(req, ['GET'])
+        const query = parse(AdminWorkspacesQuerySchema, Object.fromEntries(url.searchParams))
+        context.json(res, { workspaces: db.adminWorkspaces(query.employeeId) })
         return true
       }
       throw new GuideError('NOT_FOUND', 404)

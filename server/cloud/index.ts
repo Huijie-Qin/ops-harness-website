@@ -7,17 +7,23 @@ import { createCloudHandlers } from './http.js'
 import { InstanceManager } from './instances.js'
 import { DockerOrchestrator, ProcessOrchestrator, type Orchestrator } from './orchestrator.js'
 import { CloudScheduler } from './scheduler.js'
+import { SessionWaiters } from './session-waiters.js'
 
 export type CloudRuntime = {
-  db: CloudDatabase; instances: InstanceManager; scheduler: CloudScheduler; artifacts: ArtifactStore
+  db: CloudDatabase; instances: InstanceManager; scheduler: CloudScheduler; artifacts: ArtifactStore; waiters: SessionWaiters
   maintain(): Promise<void>; close(): Promise<void>
 }
-export type CloudRuntimeOptions = { log?: ((line: string) => void) | undefined; now?: () => number; orchestrator?: Orchestrator }
+export type CloudRuntimeOptions = {
+  log?: ((line: string) => void) | undefined; now?: () => number; orchestrator?: Orchestrator
+  /** Test hook: lower the per-session frame cap. */
+  maxEventsPerSession?: number | undefined
+}
 
 /** Assemble database, orchestrator, instance manager, scheduler and artifact store for an enabled `cloud` config. */
 export async function createCloudRuntime(config: Pick<WebsiteConfig, 'cloud' | 'websiteUrl'>, options: CloudRuntimeOptions = {}): Promise<CloudRuntime> {
   const { cloud } = config
-  const db = new CloudDatabase(cloud.directory, options.now)
+  const waiters = new SessionWaiters()
+  const db = new CloudDatabase(cloud.directory, options.now, { onSessionChange: id => waiters.notify(id), maxEventsPerSession: options.maxEventsPerSession })
   const orchestrator = options.orchestrator ?? (cloud.orchestrator === 'docker'
     ? new DockerOrchestrator({ ...cloud.docker, directory: cloud.directory })
     : new ProcessOrchestrator({ ...cloud.process, directory: cloud.directory, log: options.log }))
@@ -34,13 +40,14 @@ export async function createCloudRuntime(config: Pick<WebsiteConfig, 'cloud' | '
   // Reconcile instances recorded as live by a previous website process with what the backend actually has.
   for (const record of db.listInstances()) if (record.state !== 'stopped' && record.state !== 'error') await instances.refresh(record.employeeId)
   return {
-    db, instances, scheduler, artifacts,
+    db, instances, scheduler, artifacts, waiters,
     async maintain() {
       for (const runId of db.maintain()) await artifacts.remove(runId).catch(error => options.log?.(`artifact cleanup ${runId} failed: ${describeFailure(error)}`))
     },
     async close() {
       await scheduler.stop()
       await instances.settle()
+      waiters.close()
       await orchestrator.close().catch(error => options.log?.(`orchestrator close failed: ${describeFailure(error)}`))
       db.close()
     },

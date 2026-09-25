@@ -39,12 +39,12 @@ export function cloudConfig(directory: string, overrides: Partial<WebsiteConfig[
   }
 }
 
-export async function cloudFixture(t: TestContext, overrides: Partial<WebsiteConfig['cloud']> = {}) {
+export async function cloudFixture(t: TestContext, overrides: Partial<WebsiteConfig['cloud']> = {}, runtimeOptions: { maxEventsPerSession?: number } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'website-cloud-'))
   let time = START
   const clock = { now: () => time, set: (value: number) => { time = value }, advance: (ms: number) => { time += ms } }
   const orchestrator = new FakeOrchestrator()
-  const runtime: CloudRuntime = await createCloudRuntime({ cloud: cloudConfig(path.join(root, 'cloud'), overrides), websiteUrl: 'http://127.0.0.1:4173' }, { orchestrator, now: clock.now })
+  const runtime: CloudRuntime = await createCloudRuntime({ cloud: cloudConfig(path.join(root, 'cloud'), overrides), websiteUrl: 'http://127.0.0.1:4173' }, { orchestrator, now: clock.now, ...runtimeOptions })
   t.after(async () => { await runtime.close(); await rm(root, { recursive: true, force: true }) })
   return { root, clock, orchestrator, runtime, db: runtime.db }
 }

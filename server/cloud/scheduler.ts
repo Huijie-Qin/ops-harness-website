@@ -6,8 +6,9 @@ export type SchedulerOptions = { idleStopMinutes: number; tickMs?: number; now?:
 export type SchedulerTick = TickResult & { ensured: string[]; stopped: string[] }
 
 /**
- * Periodic control loop: fires due tasks into the run queue, recycles stale leases, wakes instances that have
- * work and puts idle ones to sleep. Every step is isolated so one orchestrator failure never stalls the loop.
+ * Periodic control loop: fires due tasks into the run queue, recycles stale run and command leases, wakes instances
+ * that have work (runs, commands, open sessions) and puts idle ones to sleep. Every step is isolated so one
+ * orchestrator failure never stalls the loop.
  */
 export class CloudScheduler {
   private timer: ReturnType<typeof setInterval> | undefined
@@ -22,9 +23,10 @@ export class CloudScheduler {
   private async pass(): Promise<SchedulerTick> {
     const now = this.now()
     const advanced = this.db.advance(now)
-    if (advanced.enqueued.length || advanced.requeued.length || advanced.failed.length || advanced.expired.length) this.options.log?.(`tick enqueued=${advanced.enqueued.length} requeued=${advanced.requeued.length} failed=${advanced.failed.length} expired=${advanced.expired.length}`)
+    if (advanced.enqueued.length || advanced.requeued.length || advanced.failed.length || advanced.expired.length || advanced.commandsRequeued.length || advanced.commandsFailed.length) this.options.log?.(`tick enqueued=${advanced.enqueued.length} requeued=${advanced.requeued.length} failed=${advanced.failed.length} expired=${advanced.expired.length} commandsRequeued=${advanced.commandsRequeued.length} commandsFailed=${advanced.commandsFailed.length}`)
     const ensured: string[] = []
-    for (const employeeId of this.db.employeesWithPendingRuns()) {
+    // Pending runs, queued commands and open sessions all need the user's instance alive.
+    for (const employeeId of this.db.employeesNeedingInstance()) {
       try { await this.instances.ensureRunning(employeeId); ensured.push(employeeId) }
       catch (error) { this.options.log?.(`ensure ${employeeId} failed: ${describeFailure(error)}`) }
     }

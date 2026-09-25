@@ -17,7 +17,7 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 
 ## 云端定时任务协议
 
-`dsh-ops-cloud-task-contract-0.1.0-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/cloud-task-contract` 的 pnpm pack，是产品 Host、官网控制面与云端执行器三方共用的协议（zod strict schema、限额常量、`cloudRoutes` 路由表，contractVersion 1）。来源、工作区输入及 SHA-256 见 [cloud-task-contract.json](cloud-task-contract.json)。官网只导入 `@dsh-ops/cloud-task-contract` 的 schema/常量/路由，不加载 Host/Cordis，也不在本仓库另写一份协议实现；契约缺口先用本地 zod 扩展并在报告中登记，再回产品仓库改源包。更新方式与运营打点协议相同：产品仓库 build 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、输入/制品哈希，执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。当前为明确标记的 sourceWorkingTree 联调制品（基线 ed77d09，源包尚未提交），正式发布应从审核后的源码重新生成。
+`dsh-ops-cloud-task-contract-0.2.1-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/cloud-task-contract` 的 pnpm pack，是产品 Host、官网控制面与云端执行器三方共用的协议（zod strict schema、限额常量、`cloudRoutes` 路由表，contractVersion 1）。来源、工作区输入及 SHA-256 见 [cloud-task-contract.json](cloud-task-contract.json)。官网只导入 `@dsh-ops/cloud-task-contract` 的 schema/常量/路由，不加载 Host/Cordis，也不在本仓库另写一份协议实现；契约缺口先用本地 zod 扩展并在报告中登记，再回产品仓库改源包。更新方式与运营打点协议相同：产品仓库 build 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、输入/制品哈希，执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。当前制品来自产品仓库已提交的源码 4a0f9bf（分支 claude/cloud-workspace-task-execution-123920，契约 0.2.1），输入哈希已核对；正式发布应从合入主线并审核后的源码重新生成。
 
 ## 运营打点协议
 

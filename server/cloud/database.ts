@@ -3,9 +3,11 @@ import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import {
-  ArtifactInfoSchema, CLAIM_LEASE_MS, CloudRunSchema, CloudTaskDefinitionSchema, CloudTaskSchema, ExecutorCatalogSchema, HEARTBEAT_INTERVAL_MS,
-  InstanceStatusSchema, MAX_QUEUED_RUNS_PER_USER, RESULT_RETENTION_DAYS, isTerminalRunStatus,
-  type ArtifactInfo, type ClaimedRun, type CloudRun, type CloudTask, type CloudTaskDefinition, type ExecutorCatalog, type ExecutorHeartbeat,
+  ArtifactInfoSchema, CLAIM_LEASE_MS, CloudRunSchema, CloudSessionSchema, CloudTaskDefinitionSchema, CloudTaskSchema, CloudWorkspaceSchema,
+  CreateSessionRequestSchema, CreateWorkspaceRequestSchema, ExecutorCatalogSchema, ExecutorCommandSchema, HEARTBEAT_INTERVAL_MS,
+  InstanceStatusSchema, MAX_EVENT_FRAME_BYTES, MAX_QUEUED_RUNS_PER_USER, RESULT_RETENTION_DAYS, SessionEventSchema, isTerminalRunStatus, terminalSessionStates,
+  type ArtifactInfo, type ClaimedRun, type CloudRun, type CloudSession, type CloudSessionEvent, type CloudSessionState, type CloudTask, type CloudTaskDefinition,
+  type CloudWorkspace, type CommandResult, type ExecutorCatalog, type ExecutorCommand, type ExecutorHeartbeat,
   type RunCompletion, type RunProgress, type RunStatus, type TaskState,
 } from '@dsh-ops/cloud-task-contract'
 import { CloudError } from './errors.js'
@@ -22,8 +24,22 @@ export type InstanceRecord = {
   updatedAt: string; lastActivityAt: string; lastError: string | null; hasCatalog: boolean
 }
 export type InstancePatch = Partial<Omit<InstanceRecord, 'employeeId' | 'updatedAt' | 'hasCatalog' | 'lastActivityAt'>> & { touchActivity?: boolean }
-export type TickResult = { enqueued: string[]; requeued: string[]; failed: string[]; expired: string[] }
+export type TickResult = { enqueued: string[]; requeued: string[]; failed: string[]; expired: string[]; commandsRequeued: string[]; commandsFailed: string[] }
 export type RunListQuery = { taskId?: string | undefined; limit: number; offset: number }
+export type CommandKind = ExecutorCommand['kind']
+export type CommandStatus = 'queued' | 'claimed' | 'done' | 'failed'
+/** Administrator view of one queued executor command (never exposed to users). */
+export type CommandRecord = {
+  id: string; employeeId: string; kind: CommandKind; status: CommandStatus; attempts: number; sessionId: string | null; workspaceId: string | null
+  createdAt: string; claimedAt: string | null; leaseUntil: string | null; finishedAt: string | null; result: CommandResult | null
+}
+export type SessionEventPage = { session: CloudSession; events: CloudSessionEvent[]; nextSince: number; hasMore: boolean }
+export type CloudDatabaseOptions = {
+  /** Called after any change a session's long-poll readers should see (new frames, state, cancel flag). */
+  onSessionChange?: ((sessionId: string) => void) | undefined
+  /** Frames a session may accumulate before further batches are refused and the session fails (`event-limit`). */
+  maxEventsPerSession?: number | undefined
+}
 
 const DAY = 86_400_000
 /** Queued runs nobody claimed within a day are dropped instead of running long after their slot. */
@@ -33,17 +49,30 @@ const MAX_LEASE_EXPIRATIONS = 2
 const CATALOG_STALE_MS = 3 * HEARTBEAT_INTERVAL_MS
 const TOKEN_GRACE_DAYS = 30
 const MAX_TASKS_PER_USER = 500
+/** Phase 2 limits: named workspaces and concurrently open sessions per user, relayed frames per session. */
+export const MAX_WORKSPACES_PER_USER = 20
+export const MAX_ACTIVE_SESSIONS_PER_USER = 3
+export const DEFAULT_MAX_EVENTS_PER_SESSION = 50_000
+/** A claimed command whose lease expires returns to the queue once; the second expiry fails it. */
+const MAX_COMMAND_ATTEMPTS = 2
+const activeSessionStates: readonly CloudSessionState[] = ['queued', 'starting', 'idle', 'running']
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
 type Row = Record<string, SQLInputValue>
+type CommandPayload = { sessionId?: string; workspaceId?: string; prompt?: string; mode?: 'queue' | 'steer' }
 
 /**
  * Website-owned state for cloud scheduled tasks: tokens (hash only), per-user instances, task definitions with
  * their next trigger, and run records. Synchronous node:sqlite on the main thread: every statement is a point
  * lookup or a tiny scan, and the scheduler tick is the only writer besides request handlers.
+ *
+ * Phase 2 adds persistent workspaces, interactive sessions with their relayed frames, and the per-user FIFO of
+ * executor commands (schema version 2; the migration only adds tables, so version 1 files upgrade in place).
  */
 export class CloudDatabase {
   private db: DatabaseSync
-  constructor(directory: string, private now: () => number = Date.now) {
+  private options: CloudDatabaseOptions
+  constructor(directory: string, private now: () => number = Date.now, options: CloudDatabaseOptions = {}) {
+    this.options = options
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     const file = path.join(directory, 'cloud.sqlite')
     if (lstatSync(directory).isSymbolicLink() || (existsSync(file) && lstatSync(file).isSymbolicLink())) throw new Error('UNSAFE_CLOUD_PATH')
@@ -61,16 +90,34 @@ export class CloudDatabase {
       CREATE INDEX IF NOT EXISTS runs_employee ON cloud_runs(employee_id, queued_at);
       CREATE INDEX IF NOT EXISTS runs_task ON cloud_runs(task_id, queued_at);
       CREATE INDEX IF NOT EXISTS runs_status ON cloud_runs(status, employee_id);
+      -- Schema 2: workspaces, sessions, relayed frames and the executor command queue (additive, idempotent).
+      CREATE TABLE IF NOT EXISTS cloud_workspaces(id TEXT PRIMARY KEY, employee_id TEXT NOT NULL, name TEXT NOT NULL, relative_path TEXT NOT NULL DEFAULT '', snapshot_json TEXT, snapshot_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(employee_id, name));
+      CREATE TABLE IF NOT EXISTS cloud_sessions(id TEXT PRIMARY KEY, employee_id TEXT NOT NULL, workspace_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', expert_id TEXT NOT NULL, skill_names_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL, instance_session_id TEXT, last_seq INTEGER NOT NULL DEFAULT 0, turns INTEGER NOT NULL DEFAULT 0, error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_activity_at TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS sessions_employee ON cloud_sessions(employee_id, created_at);
+      CREATE INDEX IF NOT EXISTS sessions_state ON cloud_sessions(state, employee_id);
+      CREATE INDEX IF NOT EXISTS sessions_workspace ON cloud_sessions(workspace_id, state);
+      CREATE TABLE IF NOT EXISTS cloud_session_events(session_id TEXT NOT NULL, seq INTEGER NOT NULL, at TEXT NOT NULL, frame_json TEXT NOT NULL, PRIMARY KEY(session_id, seq));
+      CREATE TABLE IF NOT EXISTS cloud_commands(id TEXT PRIMARY KEY, employee_id TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, session_id TEXT, workspace_id TEXT, status TEXT NOT NULL, lease_until TEXT, attempts INTEGER NOT NULL DEFAULT 0, result_json TEXT, created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT);
+      CREATE INDEX IF NOT EXISTS commands_queue ON cloud_commands(employee_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS commands_lease ON cloud_commands(status, lease_until);
+      INSERT OR IGNORE INTO schema_version VALUES(2);
     `)
     const version = Number(this.db.prepare('SELECT MAX(version) AS version FROM schema_version').get()?.version)
-    if (version !== 1) throw new Error('UNSUPPORTED_CLOUD_SCHEMA')
+    if (version !== 2) throw new Error('UNSUPPORTED_CLOUD_SCHEMA')
   }
 
   private iso(epoch = this.now()) { return new Date(epoch).toISOString() }
+  /** Sessions touched inside the current transaction; their long-poll readers are woken once it has committed. */
+  private changed = new Set<string>()
   private transaction<T>(action: () => T): T {
     this.db.exec('BEGIN IMMEDIATE')
-    try { const value = action(); this.db.exec('COMMIT'); return value }
-    catch (error) { this.db.exec('ROLLBACK'); throw error }
+    let value: T
+    try { value = action(); this.db.exec('COMMIT') }
+    catch (error) { this.db.exec('ROLLBACK'); this.changed.clear(); throw error }
+    const sessions = [...this.changed]
+    this.changed.clear()
+    for (const sessionId of sessions) this.options.onSessionChange?.(sessionId)
+    return value
   }
 
   // ── Tokens ─────────────────────────────────────────────────────────────
@@ -365,11 +412,353 @@ export class CloudDatabase {
     })
   }
 
+  // ── Workspaces (phase 2) ───────────────────────────────────────────────
+  /** Register a named workspace and queue `workspace.create`; the executor reports the directory it made. */
+  createWorkspace(employeeId: string, input: unknown): CloudWorkspace {
+    const request = this.parse(CreateWorkspaceRequestSchema, input)
+    return this.transaction(() => {
+      const count = Number(this.db.prepare('SELECT COUNT(*) AS value FROM cloud_workspaces WHERE employee_id=?').get(employeeId)!.value)
+      if (count >= MAX_WORKSPACES_PER_USER) throw new CloudError('QUEUE_FULL', 409, `at most ${MAX_WORKSPACES_PER_USER} workspaces per user`)
+      if (this.db.prepare('SELECT 1 FROM cloud_workspaces WHERE employee_id=? AND name=?').get(employeeId, request.name)) throw new CloudError('INVALID_REQUEST', 409, 'a workspace with this name already exists')
+      const id = `cw_${randomBytes(16).toString('hex')}`
+      const now = this.iso()
+      this.db.prepare('INSERT INTO cloud_workspaces(id,employee_id,name,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, employeeId, request.name, now, now)
+      this.enqueueCommandLocked(employeeId, 'workspace.create', { workspaceId: id })
+      return this.workspace(employeeId, id)
+    })
+  }
+  listWorkspaces(employeeId: string): CloudWorkspace[] {
+    return this.db.prepare('SELECT * FROM cloud_workspaces WHERE employee_id=? ORDER BY created_at, id LIMIT 200').all(employeeId).map(row => this.workspaceRecord(row))
+  }
+  workspace(employeeId: string, id: string): CloudWorkspace { return this.workspaceRecord(this.lockedWorkspace(employeeId, id)) }
+  /**
+   * Remove the record, its pending commands and (for the caller) its snapshot file. The directory inside the instance is
+   * left alone in this phase. A workspace with an open session cannot be deleted (TASK_RUNNING).
+   */
+  deleteWorkspace(employeeId: string, id: string): { hadSnapshot: boolean } {
+    return this.transaction(() => {
+      const row = this.lockedWorkspace(employeeId, id)
+      const active = Number(this.db.prepare(`SELECT COUNT(*) AS value FROM cloud_sessions WHERE workspace_id=? AND state IN (${activeSessionStates.map(() => '?').join(',')})`).get(id, ...activeSessionStates)!.value)
+      if (active > 0) throw new CloudError('TASK_RUNNING', 409, 'close the sessions using this workspace first')
+      const now = this.iso()
+      for (const command of this.db.prepare("SELECT id FROM cloud_commands WHERE workspace_id=? AND status IN ('queued','claimed')").all(id)) {
+        this.finishCommand(String(command.id), { status: 'failed', errorCode: 'workspace-deleted', message: 'the workspace was deleted before the command ran' }, now)
+      }
+      this.db.prepare('DELETE FROM cloud_workspaces WHERE id=?').run(id)
+      return { hadSnapshot: row.snapshot_json !== null }
+    })
+  }
+  /** Queue `workspace.snapshot` unless one is already pending for this workspace. */
+  requestWorkspaceSnapshot(employeeId: string, id: string): CloudWorkspace {
+    return this.transaction(() => {
+      this.lockedWorkspace(employeeId, id)
+      const pending = this.db.prepare("SELECT 1 FROM cloud_commands WHERE workspace_id=? AND kind='workspace.snapshot' AND status IN ('queued','claimed')").get(id)
+      if (!pending) this.enqueueCommandLocked(employeeId, 'workspace.snapshot', { workspaceId: id })
+      return this.workspace(employeeId, id)
+    })
+  }
+  /** The executor uploaded a snapshot archive (the `workspace.snapshot` result confirms the same bytes afterwards). */
+  setWorkspaceSnapshot(employeeId: string, id: string, artifact: ArtifactInfo): CloudWorkspace {
+    return this.transaction(() => {
+      this.lockedWorkspace(employeeId, id)
+      const now = this.iso()
+      this.db.prepare('UPDATE cloud_workspaces SET snapshot_json=?, snapshot_at=?, updated_at=? WHERE id=?').run(JSON.stringify(ArtifactInfoSchema.parse(artifact)), now, now, id)
+      this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(now, employeeId)
+      return this.workspace(employeeId, id)
+    })
+  }
+  private lockedWorkspace(employeeId: string, id: string): Row {
+    const row = this.db.prepare('SELECT * FROM cloud_workspaces WHERE id=? AND employee_id=?').get(id, employeeId)
+    if (!row) throw new CloudError('NOT_FOUND', 404)
+    return row
+  }
+  private workspaceRecord(row: Row): CloudWorkspace {
+    return CloudWorkspaceSchema.parse({
+      id: row.id, employeeId: row.employee_id, name: row.name, relativePath: row.relative_path, createdAt: row.created_at, updatedAt: row.updated_at,
+      ...(row.snapshot_json ? { snapshot: JSON.parse(String(row.snapshot_json)), snapshotAt: row.snapshot_at } : {}),
+    })
+  }
+
+  // ── Sessions (phase 2) ─────────────────────────────────────────────────
+  /** Create a queued session and its `session.start` command (first prompt included); at most 3 open sessions per user. */
+  createSession(employeeId: string, input: unknown): CloudSession {
+    const request = this.parse(CreateSessionRequestSchema, input)
+    return this.transaction(() => {
+      this.lockedWorkspace(employeeId, request.workspaceId)
+      const active = Number(this.db.prepare(`SELECT COUNT(*) AS value FROM cloud_sessions WHERE employee_id=? AND state IN (${activeSessionStates.map(() => '?').join(',')})`).get(employeeId, ...activeSessionStates)!.value)
+      if (active >= MAX_ACTIVE_SESSIONS_PER_USER) throw new CloudError('QUEUE_FULL', 409, `at most ${MAX_ACTIVE_SESSIONS_PER_USER} open sessions per user`)
+      const id = `cs_${randomBytes(16).toString('hex')}`
+      const now = this.iso()
+      this.db.prepare('INSERT INTO cloud_sessions(id,employee_id,workspace_id,title,expert_id,skill_names_json,state,created_at,updated_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(id, employeeId, request.workspaceId, request.title, request.expertId, JSON.stringify(request.skillNames), 'queued', now, now, now)
+      this.enqueueCommandLocked(employeeId, 'session.start', { sessionId: id, workspaceId: request.workspaceId, prompt: request.prompt })
+      this.changed.add(id)
+      return this.session(employeeId, id)
+    })
+  }
+  listSessions(employeeId: string): CloudSession[] {
+    return this.db.prepare('SELECT * FROM cloud_sessions WHERE employee_id=? ORDER BY created_at DESC, id DESC LIMIT 200').all(employeeId).map(row => this.sessionRecord(row))
+  }
+  session(employeeId: string, id: string): CloudSession { return this.sessionRecord(this.lockedSession(employeeId, id)) }
+  /** Follow-up prompt: only an idle or running session accepts one; the executor decides how `queue`/`steer` maps onto DSH. */
+  promptSession(employeeId: string, id: string, request: { prompt: string; mode: 'queue' | 'steer' }): CloudSession {
+    return this.transaction(() => {
+      const row = this.lockedSession(employeeId, id)
+      if (row.state !== 'idle' && row.state !== 'running') throw new CloudError('INVALID_REQUEST', 409, `session is ${String(row.state)}`)
+      this.enqueueCommandLocked(employeeId, 'session.prompt', { sessionId: id, prompt: request.prompt, mode: request.mode })
+      const now = this.iso()
+      this.db.prepare('UPDATE cloud_sessions SET updated_at=?, last_activity_at=? WHERE id=?').run(now, now, id)
+      this.changed.add(id)
+      return this.session(employeeId, id)
+    })
+  }
+  /** Cancel the current turn: flag the session (visible on the next frame batch) and queue `session.cancel`. */
+  cancelSession(employeeId: string, id: string): CloudSession {
+    return this.transaction(() => {
+      const row = this.lockedSession(employeeId, id)
+      if (row.state !== 'starting' && row.state !== 'idle' && row.state !== 'running') throw new CloudError('INVALID_REQUEST', 409, `session is ${String(row.state)}`)
+      const now = this.iso()
+      this.db.prepare('UPDATE cloud_sessions SET cancel_requested=1, updated_at=?, last_activity_at=? WHERE id=?').run(now, now, id)
+      if (!this.db.prepare("SELECT 1 FROM cloud_commands WHERE session_id=? AND kind='session.cancel' AND status IN ('queued','claimed')").get(id)) this.enqueueCommandLocked(employeeId, 'session.cancel', { sessionId: id })
+      this.changed.add(id)
+      return this.session(employeeId, id)
+    })
+  }
+  /** Close: a session that has not started ends immediately; a live one gets `session.close` and closes when the executor confirms. */
+  closeSession(employeeId: string, id: string): CloudSession {
+    return this.transaction(() => { this.closeSessionLocked(this.lockedSession(employeeId, id)); return this.session(employeeId, id) })
+  }
+  adminCloseSession(id: string): CloudSession & { cancelRequested: boolean } {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM cloud_sessions WHERE id=?').get(id)
+      if (!row) throw new CloudError('NOT_FOUND', 404)
+      this.closeSessionLocked(row)
+      return this.adminSessionRecord(this.db.prepare('SELECT * FROM cloud_sessions WHERE id=?').get(id)!)
+    })
+  }
+  private closeSessionLocked(row: Row) {
+    const id = String(row.id), state = row.state as CloudSessionState
+    if (terminalSessionStates.includes(state)) return
+    const now = this.iso()
+    if (state === 'queued') {
+      this.db.prepare("UPDATE cloud_sessions SET state='closed', cancel_requested=0, updated_at=?, last_activity_at=? WHERE id=?").run(now, now, id)
+      this.finishSessionCommands(id, 'session-closed', 'the session was closed before it started', now)
+    } else {
+      this.db.prepare('UPDATE cloud_sessions SET updated_at=?, last_activity_at=? WHERE id=?').run(now, now, id)
+      if (!this.db.prepare("SELECT 1 FROM cloud_commands WHERE session_id=? AND kind='session.close' AND status IN ('queued','claimed')").get(id)) this.enqueueCommandLocked(String(row.employee_id), 'session.close', { sessionId: id })
+    }
+    this.changed.add(id)
+  }
+  /** Page of relayed frames after `since` (ascending), plus the current session record. */
+  sessionEvents(employeeId: string, id: string, since: number, limit: number): SessionEventPage {
+    const session = this.session(employeeId, id)
+    const rows = this.db.prepare('SELECT seq, at, frame_json FROM cloud_session_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, since, limit + 1)
+    const page = rows.slice(0, limit)
+    const events = page.map(row => SessionEventSchema.parse({ seq: Number(row.seq), at: row.at, frame: JSON.parse(String(row.frame_json)) }))
+    return { session, events, nextSince: events.length ? events[events.length - 1]!.seq : since, hasMore: rows.length > limit }
+  }
+  /**
+   * Store a contiguous batch from the executor. Frames already stored (seq ≤ lastSeq, a retry) are ignored; a batch that
+   * starts beyond lastSeq + 1 is refused with the current lastSeq in the message so the executor can resend from there.
+   */
+  appendSessionFrames(employeeId: string, id: string, events: CloudSessionEvent[]): { lastSeq: number; cancelRequested: boolean } {
+    const limit = this.options.maxEventsPerSession ?? DEFAULT_MAX_EVENTS_PER_SESSION
+    const row = this.lockedSession(employeeId, id)
+    if (row.state === 'failed') throw new CloudError('INVALID_REQUEST', 409, 'session is failed')
+    for (let index = 1; index < events.length; index += 1) if (events[index]!.seq !== events[index - 1]!.seq + 1) throw new CloudError('INVALID_REQUEST', 400, 'batch sequence numbers are not contiguous')
+    const lastSeq = Number(row.last_seq)
+    const first = events[0]!.seq
+    if (first > lastSeq + 1) throw new CloudError('INVALID_REQUEST', 409, `sequence gap: expected ${lastSeq + 1}, got ${first}; lastSeq=${lastSeq}`)
+    const fresh = events.filter(event => event.seq > lastSeq)
+    if (lastSeq + fresh.length > limit) {
+      this.transaction(() => this.failSessionLocked(id, 'event-limit', `more than ${limit} frames were relayed`))
+      throw new CloudError('INVALID_REQUEST', 409, `event limit of ${limit} frames reached; the session has been failed`)
+    }
+    for (const event of fresh) if (Buffer.byteLength(JSON.stringify(event.frame)) > MAX_EVENT_FRAME_BYTES) throw new CloudError('INVALID_REQUEST', 413, `frame ${event.seq} exceeds ${MAX_EVENT_FRAME_BYTES} bytes`)
+    return this.transaction(() => {
+      const current = this.db.prepare('SELECT last_seq, cancel_requested FROM cloud_sessions WHERE id=?').get(id)!
+      let seq = Number(current.last_seq)
+      for (const event of fresh) {
+        if (event.seq <= seq) continue
+        if (event.seq !== seq + 1) throw new CloudError('INVALID_REQUEST', 409, `sequence gap: expected ${seq + 1}, got ${event.seq}; lastSeq=${seq}`)
+        this.db.prepare('INSERT INTO cloud_session_events(session_id,seq,at,frame_json) VALUES(?,?,?,?)').run(id, event.seq, event.at, JSON.stringify(event.frame))
+        seq = event.seq
+      }
+      const now = this.iso()
+      this.db.prepare('UPDATE cloud_sessions SET last_seq=?, updated_at=?, last_activity_at=? WHERE id=?').run(seq, now, now, id)
+      this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(now, employeeId)
+      if (seq !== Number(current.last_seq)) this.changed.add(id)
+      return { lastSeq: seq, cancelRequested: Number(current.cancel_requested) === 1 }
+    })
+  }
+  /** Executor state report; terminal sessions are immutable (a repeated report is a no-op). */
+  reportSessionStatus(employeeId: string, id: string, report: { state: 'idle' | 'running' | 'closed' | 'failed'; turns?: number | undefined; errorCode: string; errorMessage: string }): CloudSession {
+    return this.transaction(() => {
+      const row = this.lockedSession(employeeId, id)
+      if (terminalSessionStates.includes(row.state as CloudSessionState)) return this.sessionRecord(row)
+      const now = this.iso()
+      const clearsCancel = report.state !== 'running'
+      this.db.prepare('UPDATE cloud_sessions SET state=?, turns=COALESCE(?,turns), error_code=?, error_message=?, updated_at=?, last_activity_at=?, cancel_requested=CASE WHEN ? THEN 0 ELSE cancel_requested END WHERE id=?')
+        .run(report.state, report.turns ?? null, report.errorCode, report.errorMessage.slice(0, 500), now, now, clearsCancel ? 1 : 0, id)
+      if (report.state === 'closed' || report.state === 'failed') this.finishSessionCommands(id, report.state === 'closed' ? 'session-closed' : 'session-failed', `the session is ${report.state}`, now)
+      this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(now, employeeId)
+      this.changed.add(id)
+      return this.session(employeeId, id)
+    })
+  }
+  /** Instance going away: idle/running sessions are closed with the reason and their pending commands dropped. Returns the closed ids. */
+  closeSessionsForInstance(employeeId: string, errorCode: string, errorMessage: string): string[] {
+    return this.transaction(() => {
+      const ids = this.db.prepare("SELECT id FROM cloud_sessions WHERE employee_id=? AND state IN ('idle','running')").all(employeeId).map(row => String(row.id))
+      const now = this.iso()
+      for (const id of ids) {
+        this.db.prepare("UPDATE cloud_sessions SET state='closed', error_code=?, error_message=?, cancel_requested=0, updated_at=?, last_activity_at=? WHERE id=?").run(errorCode, errorMessage.slice(0, 500), now, now, id)
+        this.finishSessionCommands(id, 'session-closed', errorMessage, now)
+        this.changed.add(id)
+      }
+      return ids
+    })
+  }
+  private failSessionLocked(id: string, errorCode: string, errorMessage: string) {
+    const now = this.iso()
+    const changed = this.db.prepare("UPDATE cloud_sessions SET state='failed', error_code=?, error_message=?, cancel_requested=0, updated_at=?, last_activity_at=? WHERE id=? AND state NOT IN ('closed','failed')").run(errorCode, errorMessage.slice(0, 500), now, now, id).changes
+    if (Number(changed) > 0) { this.finishSessionCommands(id, 'session-failed', errorMessage, now); this.changed.add(id) }
+  }
+  private finishSessionCommands(sessionId: string, errorCode: string, message: string, nowIso: string) {
+    for (const command of this.db.prepare("SELECT id FROM cloud_commands WHERE session_id=? AND status IN ('queued','claimed')").all(sessionId)) {
+      this.finishCommand(String(command.id), { status: 'failed', errorCode, message }, nowIso)
+    }
+  }
+  private lockedSession(employeeId: string, id: string): Row {
+    const row = this.db.prepare('SELECT * FROM cloud_sessions WHERE id=? AND employee_id=?').get(id, employeeId)
+    if (!row) throw new CloudError('NOT_FOUND', 404)
+    return row
+  }
+  private sessionRecord(row: Row): CloudSession {
+    return CloudSessionSchema.parse({
+      id: row.id, employeeId: row.employee_id, workspaceId: row.workspace_id, title: row.title, expertId: row.expert_id, skillNames: JSON.parse(String(row.skill_names_json)),
+      state: row.state, ...(row.instance_session_id ? { instanceSessionId: row.instance_session_id } : {}), lastSeq: Number(row.last_seq), turns: Number(row.turns),
+      errorCode: row.error_code, errorMessage: row.error_message, cancelRequested: Number(row.cancel_requested) === 1,
+      createdAt: row.created_at, updatedAt: row.updated_at, lastActivityAt: row.last_activity_at,
+    })
+  }
+  private adminSessionRecord(row: Row): CloudSession & { cancelRequested: boolean } { return this.sessionRecord(row) }
+
+  // ── Executor commands (phase 2) ────────────────────────────────────────
+  private enqueueCommandLocked(employeeId: string, kind: CommandKind, payload: CommandPayload): string {
+    const id = `cc_${randomBytes(16).toString('hex')}`
+    this.db.prepare("INSERT INTO cloud_commands(id,employee_id,kind,payload_json,session_id,workspace_id,status,created_at) VALUES(?,?,?,?,?,?,'queued',?)")
+      .run(id, employeeId, kind, JSON.stringify(payload), payload.sessionId ?? null, payload.workspaceId ?? null, this.iso())
+    return id
+  }
+  /** Hand the user's oldest queued command to the executor (FIFO); `session.start` moves its session to `starting`. */
+  claimCommand(employeeId: string): { command: ExecutorCommand; leaseMs: number } | undefined {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM cloud_commands WHERE employee_id=? AND status='queued' ORDER BY created_at, rowid LIMIT 1").get(employeeId)
+      if (!row) return undefined
+      const now = this.iso()
+      const id = String(row.id)
+      this.db.prepare("UPDATE cloud_commands SET status='claimed', claimed_at=?, lease_until=?, attempts=attempts+1 WHERE id=?").run(now, this.iso(this.now() + CLAIM_LEASE_MS), id)
+      if (row.session_id !== null) {
+        if (row.kind === 'session.start') this.db.prepare("UPDATE cloud_sessions SET state='starting', updated_at=? WHERE id=? AND state='queued'").run(now, String(row.session_id))
+        this.db.prepare('UPDATE cloud_sessions SET last_activity_at=? WHERE id=?').run(now, String(row.session_id))
+        this.changed.add(String(row.session_id))
+      }
+      this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(now, employeeId)
+      return { command: this.commandForExecutor(this.db.prepare('SELECT * FROM cloud_commands WHERE id=?').get(id)!), leaseMs: CLAIM_LEASE_MS }
+    })
+  }
+  private commandForExecutor(row: Row): ExecutorCommand {
+    const payload = JSON.parse(String(row.payload_json)) as CommandPayload
+    const session = row.session_id === null ? undefined : this.db.prepare('SELECT * FROM cloud_sessions WHERE id=?').get(String(row.session_id))
+    const workspaceId = payload.workspaceId ?? (session ? String(session.workspace_id) : undefined)
+    const workspace = workspaceId === undefined ? undefined : this.db.prepare('SELECT * FROM cloud_workspaces WHERE id=?').get(workspaceId)
+    return ExecutorCommandSchema.parse({
+      id: row.id, kind: row.kind, employeeId: row.employee_id, queuedAt: row.created_at,
+      ...(session ? { session: this.sessionRecord(session) } : {}),
+      ...(workspace ? { workspace: this.workspaceRecord(workspace) } : {}),
+      ...(payload.prompt !== undefined ? { prompt: payload.prompt } : {}), ...(payload.mode !== undefined ? { mode: payload.mode } : {}),
+    })
+  }
+  /**
+   * Executor result. `done` applies the kind's effect (workspace path, snapshot confirmation, DSH session id, cancel flag,
+   * close); `failed` fails the session. Reporting a command that already finished is a harmless no-op (retries).
+   */
+  completeCommand(employeeId: string, id: string, result: CommandResult): void {
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM cloud_commands WHERE id=? AND employee_id=?').get(id, employeeId)
+      if (!row) throw new CloudError('NOT_FOUND', 404)
+      if (row.status === 'done' || row.status === 'failed') return
+      const kind = String(row.kind) as CommandKind, sessionId = row.session_id === null ? undefined : String(row.session_id), workspaceId = row.workspace_id === null ? undefined : String(row.workspace_id)
+      const now = this.iso()
+      if (result.status === 'failed') {
+        this.finishCommand(id, result, now)
+        if (sessionId) this.failSessionLocked(sessionId, result.errorCode || 'command-failed', result.message || `${kind} failed in the instance`)
+        return
+      }
+      if (kind === 'workspace.create') {
+        if (!result.relativePath) throw new CloudError('INVALID_REQUEST', 400, 'relativePath is required for workspace.create')
+        this.db.prepare('UPDATE cloud_workspaces SET relative_path=?, updated_at=? WHERE id=?').run(result.relativePath, now, workspaceId ?? '')
+      } else if (kind === 'workspace.snapshot' && result.artifact !== undefined) {
+        const stored = workspaceId === undefined ? undefined : this.db.prepare('SELECT snapshot_json FROM cloud_workspaces WHERE id=?').get(workspaceId)?.snapshot_json
+        const current = stored ? ArtifactInfoSchema.parse(JSON.parse(String(stored))) : undefined
+        if (!current || current.sha256 !== result.artifact.sha256 || current.size !== result.artifact.size) throw new CloudError('ARTIFACT_MISMATCH', 409, 'snapshot result does not match the uploaded archive')
+      } else if (kind === 'session.start') {
+        if (!result.instanceSessionId) throw new CloudError('INVALID_REQUEST', 400, 'instanceSessionId is required for session.start')
+        this.db.prepare("UPDATE cloud_sessions SET instance_session_id=?, state=CASE WHEN state IN ('queued','starting') THEN 'running' ELSE state END, updated_at=?, last_activity_at=? WHERE id=?").run(result.instanceSessionId, now, now, sessionId ?? '')
+      } else if (kind === 'session.cancel') {
+        this.db.prepare('UPDATE cloud_sessions SET cancel_requested=0, updated_at=? WHERE id=?').run(now, sessionId ?? '')
+      } else if (kind === 'session.close') {
+        this.db.prepare("UPDATE cloud_sessions SET state='closed', cancel_requested=0, updated_at=?, last_activity_at=? WHERE id=? AND state NOT IN ('closed','failed')").run(now, now, sessionId ?? '')
+        if (sessionId) this.finishSessionCommands(sessionId, 'session-closed', 'the session was closed', now)
+      } else if (kind === 'session.prompt') {
+        this.db.prepare('UPDATE cloud_sessions SET last_activity_at=? WHERE id=?').run(now, sessionId ?? '')
+      }
+      this.finishCommand(id, result, now)
+      this.db.prepare('UPDATE cloud_instances SET last_activity_at=? WHERE employee_id=?').run(now, employeeId)
+      if (sessionId) this.changed.add(sessionId)
+    })
+  }
+  private finishCommand(id: string, result: CommandResult, nowIso: string) {
+    this.db.prepare('UPDATE cloud_commands SET status=?, result_json=?, finished_at=?, lease_until=NULL WHERE id=?').run(result.status, JSON.stringify(result), nowIso, id)
+  }
+  private commandRecord(row: Row): CommandRecord {
+    const text = (value: SQLInputValue | undefined) => value === null || value === undefined ? null : String(value)
+    return {
+      id: String(row.id), employeeId: String(row.employee_id), kind: row.kind as CommandKind, status: row.status as CommandStatus, attempts: Number(row.attempts),
+      sessionId: text(row.session_id), workspaceId: text(row.workspace_id), createdAt: String(row.created_at), claimedAt: text(row.claimed_at), leaseUntil: text(row.lease_until), finishedAt: text(row.finished_at),
+      result: row.result_json ? JSON.parse(String(row.result_json)) as CommandResult : null,
+    }
+  }
+  adminSessions(employeeId: string | undefined, limit: number): (CloudSession & { cancelRequested: boolean })[] {
+    const rows = employeeId === undefined
+      ? this.db.prepare('SELECT * FROM cloud_sessions ORDER BY created_at DESC, id DESC LIMIT ?').all(limit)
+      : this.db.prepare('SELECT * FROM cloud_sessions WHERE employee_id=? ORDER BY created_at DESC, id DESC LIMIT ?').all(employeeId, limit)
+    return rows.map(row => this.adminSessionRecord(row))
+  }
+  adminCommands(employeeId: string | undefined, limit: number): CommandRecord[] {
+    const rows = employeeId === undefined
+      ? this.db.prepare('SELECT * FROM cloud_commands ORDER BY created_at DESC, rowid DESC LIMIT ?').all(limit)
+      : this.db.prepare('SELECT * FROM cloud_commands WHERE employee_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?').all(employeeId, limit)
+    return rows.map(row => this.commandRecord(row))
+  }
+  adminWorkspaces(employeeId: string | undefined): CloudWorkspace[] {
+    const rows = employeeId === undefined
+      ? this.db.prepare('SELECT * FROM cloud_workspaces ORDER BY created_at DESC, id DESC LIMIT 500').all()
+      : this.db.prepare('SELECT * FROM cloud_workspaces WHERE employee_id=? ORDER BY created_at DESC, id DESC LIMIT 500').all(employeeId)
+    return rows.map(row => this.workspaceRecord(row))
+  }
+  private parse<T>(schema: { safeParse(input: unknown): { success: true; data: T } | { success: false; error: { issues: { path: PropertyKey[]; message: string }[] } } }, input: unknown): T {
+    const result = schema.safeParse(input)
+    if (!result.success) { const issue = result.error.issues[0]; throw new CloudError('INVALID_REQUEST', 400, issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'invalid request') }
+    return result.data
+  }
+
   // ── Scheduler support ──────────────────────────────────────────────────
   /** One scheduler pass over the database: fire due tasks, recycle expired leases, drop stale queue entries. */
   advance(now = this.now()): TickResult {
     return this.transaction(() => {
-      const result: TickResult = { enqueued: [], requeued: [], failed: [], expired: [] }
+      const result: TickResult = { enqueued: [], requeued: [], failed: [], expired: [], commandsRequeued: [], commandsFailed: [] }
       const nowIso = this.iso(now)
       for (const row of this.db.prepare("SELECT * FROM cloud_tasks WHERE state='scheduled' AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at LIMIT 500").all(nowIso)) {
         const employeeId = String(row.employee_id), id = String(row.id)
@@ -397,25 +786,49 @@ export class CloudDatabase {
         this.db.prepare("UPDATE cloud_runs SET status='expired', finished_at=?, error_code='queue-expired' WHERE id=?").run(nowIso, String(row.id))
         result.expired.push(String(row.id))
       }
+      // Command leases: the first expiry returns the command to the queue, the second fails it (and its session).
+      for (const row of this.db.prepare("SELECT id, kind, attempts, session_id FROM cloud_commands WHERE status='claimed' AND lease_until<? LIMIT 500").all(nowIso)) {
+        const id = String(row.id), kind = String(row.kind) as CommandKind
+        if (Number(row.attempts) >= MAX_COMMAND_ATTEMPTS) {
+          this.finishCommand(id, { status: 'failed', errorCode: 'command-lease-expired', message: 'the executor did not report a result before the lease expired' }, nowIso)
+          if (row.session_id !== null) this.failSessionLocked(String(row.session_id), 'command-lease-expired', `${kind} was not completed by the instance`)
+          result.commandsFailed.push(id)
+        } else {
+          this.db.prepare("UPDATE cloud_commands SET status='queued', lease_until=NULL, claimed_at=NULL WHERE id=?").run(id)
+          if (kind === 'session.start' && row.session_id !== null) this.db.prepare("UPDATE cloud_sessions SET state='queued', updated_at=? WHERE id=? AND state='starting'").run(nowIso, String(row.session_id))
+          result.commandsRequeued.push(id)
+        }
+      }
       return result
     })
   }
-  /** Users who currently need a live instance. */
-  employeesWithPendingRuns(): string[] {
-    return this.db.prepare("SELECT DISTINCT employee_id FROM cloud_runs WHERE status IN ('queued','claimed','running') ORDER BY employee_id LIMIT 1000").all().map(row => String(row.employee_id))
+  /** Users who currently need a live instance: pending runs, queued commands or a session that is not finished. */
+  employeesNeedingInstance(): string[] {
+    return this.db.prepare(`SELECT DISTINCT employee_id FROM (
+      SELECT employee_id FROM cloud_runs WHERE status IN ('queued','claimed','running')
+      UNION SELECT employee_id FROM cloud_commands WHERE status IN ('queued','claimed')
+      UNION SELECT employee_id FROM cloud_sessions WHERE state IN ('queued','starting','running')) ORDER BY employee_id LIMIT 1000`).all().map(row => String(row.employee_id))
   }
-  /** Live instances without pending runs whose last activity is older than the threshold. */
+  /** Live instances without pending work whose last activity is older than the threshold (idle sessions do not keep an instance up). */
   idleInstances(idleBefore: number): string[] {
     return this.db.prepare(`SELECT employee_id FROM cloud_instances i WHERE i.state IN ('starting','running') AND i.last_activity_at<?
-      AND NOT EXISTS (SELECT 1 FROM cloud_runs r WHERE r.employee_id=i.employee_id AND r.status IN ('queued','claimed','running')) ORDER BY employee_id LIMIT 1000`).all(this.iso(idleBefore)).map(row => String(row.employee_id))
+      AND NOT EXISTS (SELECT 1 FROM cloud_runs r WHERE r.employee_id=i.employee_id AND r.status IN ('queued','claimed','running'))
+      AND NOT EXISTS (SELECT 1 FROM cloud_commands c WHERE c.employee_id=i.employee_id AND c.status IN ('queued','claimed'))
+      AND NOT EXISTS (SELECT 1 FROM cloud_sessions s WHERE s.employee_id=i.employee_id AND s.state IN ('queued','starting','running')) ORDER BY employee_id LIMIT 1000`).all(this.iso(idleBefore)).map(row => String(row.employee_id))
   }
-  /** Drop finished runs older than the retention window; returns the run ids whose artifacts must be deleted. */
+  /** Drop finished runs, sessions (with their frames) and commands older than the retention window; returns the run ids whose artifacts must be deleted. */
   maintain(): string[] {
     return this.transaction(() => {
       const before = this.iso(this.now() - RESULT_RETENTION_DAYS * DAY)
       const ids = this.db.prepare('SELECT id FROM cloud_runs WHERE finished_at IS NOT NULL AND finished_at<? LIMIT 5000').all(before).map(row => String(row.id))
       for (const id of ids) this.db.prepare('DELETE FROM cloud_runs WHERE id=?').run(id)
       this.db.prepare('DELETE FROM cloud_tokens WHERE (revoked_at IS NOT NULL AND revoked_at<?) OR (expires_at IS NOT NULL AND expires_at<?)').run(this.iso(this.now() - TOKEN_GRACE_DAYS * DAY), this.iso(this.now() - TOKEN_GRACE_DAYS * DAY))
+      for (const row of this.db.prepare("SELECT id FROM cloud_sessions WHERE state IN ('closed','failed') AND updated_at<? LIMIT 5000").all(before)) {
+        this.db.prepare('DELETE FROM cloud_session_events WHERE session_id=?').run(String(row.id))
+        this.db.prepare('DELETE FROM cloud_sessions WHERE id=?').run(String(row.id))
+      }
+      this.db.prepare('DELETE FROM cloud_session_events WHERE session_id NOT IN (SELECT id FROM cloud_sessions)').run()
+      this.db.prepare("DELETE FROM cloud_commands WHERE status IN ('done','failed') AND finished_at<?").run(before)
       return ids
     })
   }

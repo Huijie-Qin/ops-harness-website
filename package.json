@@ -21,7 +21,7 @@
     "yaml": "2.9.0",
     "zod": "4.4.3",
     "@dsh-ops/tracking": "file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz",
-    "@dsh-ops/cloud-task-contract": "file:vendor/dsh-ops-cloud-task-contract-0.1.0-e65fa56b54a2.tgz"
+    "@dsh-ops/cloud-task-contract": "file:vendor/dsh-ops-cloud-task-contract-0.2.1-2e5b9f053348.tgz"
   },
   "devDependencies": {
     "@types/markdown-it": "14.2.0",

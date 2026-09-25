@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import type { CloudRun } from '@dsh-ops/cloud-task-contract'
+import type { CloudRun, CloudSession, CommandResult } from '@dsh-ops/cloud-task-contract'
 import { ApiError, guideApi, requestMessage } from './guide-api'
 import WebsiteDialog from './WebsiteDialog.vue'
 
 type TokenRecord = { hashPrefix: string; employeeId: string; kind: 'user' | 'executor'; label: string; createdAt: string; expiresAt: string | null; revokedAt: string | null; lastUsedAt: string | null }
 type InstanceRecord = { employeeId: string; state: string; backend: string; backendRef: string | null; port: number | null; launchUrl: string | null; lastHeartbeatAt: string | null; bundleVersion: string | null; dshVersion: string | null; updatedAt: string; lastActivityAt: string; lastError: string | null; hasCatalog: boolean }
+type SessionRecord = CloudSession & { cancelRequested: boolean }
+type CommandRecord = { id: string; employeeId: string; kind: string; status: string; attempts: number; sessionId: string | null; workspaceId: string | null; createdAt: string; claimedAt: string | null; leaseUntil: string | null; finishedAt: string | null; result: CommandResult | null }
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ error: [e: unknown]; busy: [v: boolean] }>()
-const tokens = ref<TokenRecord[]>([]), instances = ref<InstanceRecord[]>([]), runs = ref<CloudRun[]>([]), backend = ref('')
+const tokens = ref<TokenRecord[]>([]), instances = ref<InstanceRecord[]>([]), runs = ref<CloudRun[]>([]), sessions = ref<SessionRecord[]>([]), commands = ref<CommandRecord[]>([]), backend = ref('')
 const busy = ref(false), loading = ref(true), disabled = ref(false), notice = ref(''), error = ref('')
 const form = ref({ employeeId: '', label: '', expiresInDays: '' })
 const issued = ref<{ token: string; record: TokenRecord }>()
@@ -20,6 +22,9 @@ const lifetime = new AbortController()
 const visibleTokens = computed(() => tokens.value.filter(token => showRevoked.value || !token.revokedAt))
 const stateLabels: Record<string, string> = { stopped: '已停止', starting: '启动中', running: '运行中', stopping: '停止中', error: '异常' }
 const runLabels: Record<string, string> = { queued: '排队中', claimed: '已领取', running: '执行中', succeeded: '成功', failed: '失败', cancelled: '已取消', 'timed-out': '超时', expired: '已过期' }
+const sessionLabels: Record<string, string> = { queued: '排队中', starting: '启动中', idle: '空闲', running: '执行中', closed: '已关闭', failed: '失败' }
+const commandLabels: Record<string, string> = { 'session.start': '启动会话', 'session.prompt': '追问', 'session.cancel': '取消当前轮', 'session.close': '关闭会话', 'workspace.create': '创建工作区', 'workspace.snapshot': '打包快照' }
+const commandStatusLabels: Record<string, string> = { queued: '排队中', claimed: '已领取', done: '完成', failed: '失败' }
 const call = <T,>(url: string, options: { method?: string; data?: unknown } = {}) => guideApi<T>(url, { ...options, csrf: props.csrf, signal: lifetime.signal })
 async function run(fn: () => Promise<void>) {
   if (busy.value) return
@@ -32,13 +37,31 @@ async function run(fn: () => Promise<void>) {
   } finally { busy.value = false; emit('busy', false) }
 }
 async function list() {
-  const [tokenList, instanceList, runList] = await Promise.all([
+  const filter = runFilter.value.trim() ? `&employeeId=${encodeURIComponent(runFilter.value.trim().toLowerCase())}` : ''
+  const [tokenList, instanceList, runList, sessionList, commandList] = await Promise.all([
     call<{ tokens: TokenRecord[] }>('/api/admin/cloud/tokens'),
     call<{ instances: InstanceRecord[]; backend: string }>('/api/admin/cloud/instances'),
-    call<{ runs: CloudRun[] }>(`/api/admin/cloud/runs?limit=50${runFilter.value.trim() ? `&employeeId=${encodeURIComponent(runFilter.value.trim().toLowerCase())}` : ''}`),
+    call<{ runs: CloudRun[] }>(`/api/admin/cloud/runs?limit=50${filter}`),
+    call<{ sessions: SessionRecord[] }>(`/api/admin/cloud/sessions?limit=50${filter}`),
+    call<{ commands: CommandRecord[] }>(`/api/admin/cloud/commands?limit=50${filter}`),
   ])
   tokens.value = tokenList.tokens; instances.value = instanceList.instances; backend.value = instanceList.backend; runs.value = runList.runs
+  sessions.value = sessionList.sessions; commands.value = commandList.commands
   disabled.value = false; loading.value = false
+}
+const openSession = (session: SessionRecord) => !['closed', 'failed'].includes(session.state)
+function closeSession(session: SessionRecord) {
+  confirmation.value = { title: '关闭这个云端会话？', message: `${session.employeeId} · ${session.title || '未命名会话'}（${session.id.slice(0, 11)}…）。尚未启动的会话立即结束；正在运行的会话会在实例确认后关闭，用户在工作助手里会看到会话已关闭。`, label: '关闭会话', action: () => void run(async () => {
+    await call(`/api/admin/cloud/sessions/${encodeURIComponent(session.id)}/close`, { method: 'POST', data: {} })
+    await list(); notice.value = '已请求关闭会话。'
+  }) }
+}
+function commandSummary(command: CommandRecord) {
+  if (!command.result) return command.status === 'claimed' && command.leaseUntil ? `租约至 ${when(command.leaseUntil)}` : '—'
+  if (command.result.status === 'failed') return `错误 ${command.result.errorCode || 'failed'}${command.result.message ? `：${command.result.message}` : ''}`
+  if (command.result.relativePath) return command.result.relativePath
+  if (command.result.artifact) return `快照 ${command.result.artifact.fileCount} 个文件`
+  return command.result.instanceSessionId ? `实例会话 ${command.result.instanceSessionId}` : '完成'
 }
 function validEmployee(value: string) { return /^[a-z0-9._-]{1,64}$/.test(value.trim().toLowerCase()) }
 async function issue() {
@@ -66,7 +89,7 @@ function revoke(token: TokenRecord) {
   }) }
 }
 function stop(instance: InstanceRecord) {
-  confirmation.value = { title: '停止这个实例？', message: `${instance.employeeId} 的云端实例将被停止并吊销其执行器令牌；排队中的任务会在下次调度时重新拉起实例。`, label: '停止实例', action: () => void run(async () => {
+  confirmation.value = { title: '停止这个实例？', message: `${instance.employeeId} 的云端实例将被停止并吊销其执行器令牌；该用户空闲或运行中的云端会话会被关闭，排队中的任务与命令会在下次调度时重新拉起实例。`, label: '停止实例', action: () => void run(async () => {
     await call(`/api/admin/cloud/instances/${encodeURIComponent(instance.employeeId)}/stop`, { method: 'POST', data: {} })
     await list(); notice.value = `已停止 ${instance.employeeId} 的实例。`
   }) }
@@ -127,12 +150,28 @@ onBeforeUnmount(() => { lifetime.abort(); emit('busy', false) })
         <p v-else-if="!loading" class="editor-help">还没有拉起过实例。用户首次打开云端任务时会准备专家目录；之后有排队任务时会自动启动实例。</p>
       </section>
       <section class="cloud-block" aria-labelledby="cloud-runs-heading">
-        <div class="cloud-block-heading"><h3 id="cloud-runs-heading">最近运行<span>（{{ runs.length }}）</span></h3><form class="cloud-run-filter" role="search" @submit.prevent="run(list)"><input v-model="runFilter" type="search" aria-label="按工号筛选运行记录" placeholder="按工号筛选" maxlength="64" /><button class="button secondary" :disabled="busy">筛选</button></form></div>
+        <div class="cloud-block-heading"><h3 id="cloud-runs-heading">最近运行<span>（{{ runs.length }}）</span></h3><form class="cloud-run-filter" role="search" @submit.prevent="run(list)"><input v-model="runFilter" type="search" aria-label="按工号筛选运行、会话与命令" placeholder="按工号筛选" maxlength="64" /><button class="button secondary" :disabled="busy">筛选</button></form></div>
         <div v-if="runs.length" class="cloud-table" role="region" aria-label="运行记录，可横向滚动" tabindex="0"><table>
           <thead><tr><th scope="col">任务</th><th scope="col">工号</th><th scope="col">状态</th><th scope="col">触发</th><th scope="col">排队</th><th scope="col">结束</th><th scope="col">结果</th></tr></thead>
           <tbody><tr v-for="item in runs" :key="item.id"><td><strong>{{ item.taskName }}</strong><small><code>{{ item.id }}</code></small></td><td>{{ item.employeeId }}</td><td><span class="cloud-status" :class="item.status">{{ runLabels[item.status] ?? item.status }}</span><small v-if="item.cancelRequested && !['cancelled'].includes(item.status)">已请求取消</small></td><td>{{ item.trigger === 'manual' ? '手动' : '计划' }}</td><td>{{ when(item.queuedAt) }}</td><td>{{ when(item.finishedAt) }}</td><td class="cloud-wrap">{{ item.errorCode ? `错误 ${item.errorCode}` : item.summary || (item.artifact ? `产物 ${item.artifact.fileCount} 个文件` : '—') }}</td></tr></tbody>
         </table></div>
         <p v-else-if="!loading" class="editor-help">{{ runFilter ? '该工号没有运行记录。' : '最近 7 天没有运行记录。' }}</p>
+      </section>
+      <section class="cloud-block" aria-labelledby="cloud-sessions-heading">
+        <div class="cloud-block-heading"><h3 id="cloud-sessions-heading">云端会话<span>（{{ sessions.length }}）</span></h3><span class="editor-help">按上方工号筛选；事件内容只在用户的工作助手里展示。</span></div>
+        <div v-if="sessions.length" class="cloud-table" role="region" aria-label="云端会话列表，可横向滚动" tabindex="0"><table>
+          <thead><tr><th scope="col">会话</th><th scope="col">工号</th><th scope="col">状态</th><th scope="col">专家</th><th scope="col">轮次 / 事件</th><th scope="col">最近活动</th><th scope="col">说明</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+          <tbody><tr v-for="item in sessions" :key="item.id"><td><strong>{{ item.title || '未命名会话' }}</strong><small><code>{{ item.id }}</code></small></td><td>{{ item.employeeId }}</td><td><span class="cloud-status" :class="item.state">{{ sessionLabels[item.state] ?? item.state }}</span><small v-if="item.cancelRequested">已请求取消</small></td><td>{{ item.expertId }}<small v-if="item.skillNames.length">{{ item.skillNames.join('、') }}</small></td><td>{{ item.turns }} / {{ item.lastSeq }}</td><td>{{ when(item.lastActivityAt) }}</td><td class="cloud-wrap"><span v-if="item.errorCode" class="cloud-error">{{ item.errorCode }}{{ item.errorMessage ? `：${item.errorMessage}` : '' }}</span><span v-else-if="item.instanceSessionId">实例会话 {{ item.instanceSessionId }}</span><span v-else>—</span></td><td><button v-if="openSession(item)" class="cloud-action danger" :disabled="busy" @click="closeSession(item)">关闭</button></td></tr></tbody>
+        </table></div>
+        <p v-else-if="!loading" class="editor-help">{{ runFilter ? '该工号没有云端会话。' : '最近 7 天没有云端会话。' }}</p>
+      </section>
+      <section class="cloud-block" aria-labelledby="cloud-commands-heading">
+        <div class="cloud-block-heading"><h3 id="cloud-commands-heading">执行器命令<span>（{{ commands.length }}）</span></h3><span class="editor-help">实例按工号顺序领取；租约到期回队一次，再次到期失败。</span></div>
+        <div v-if="commands.length" class="cloud-table" role="region" aria-label="执行器命令列表，可横向滚动" tabindex="0"><table>
+          <thead><tr><th scope="col">命令</th><th scope="col">工号</th><th scope="col">状态</th><th scope="col">领取次数</th><th scope="col">排队</th><th scope="col">结束</th><th scope="col">结果</th></tr></thead>
+          <tbody><tr v-for="item in commands" :key="item.id"><td><strong>{{ commandLabels[item.kind] ?? item.kind }}</strong><small><code>{{ item.sessionId ?? item.workspaceId ?? item.id }}</code></small></td><td>{{ item.employeeId }}</td><td><span class="cloud-status" :class="item.status === 'done' ? 'succeeded' : item.status">{{ commandStatusLabels[item.status] ?? item.status }}</span></td><td>{{ item.attempts }}</td><td>{{ when(item.createdAt) }}</td><td>{{ when(item.finishedAt) }}</td><td class="cloud-wrap" :class="{ 'cloud-error': item.status === 'failed' }">{{ commandSummary(item) }}</td></tr></tbody>
+        </table></div>
+        <p v-else-if="!loading" class="editor-help">{{ runFilter ? '该工号没有执行器命令。' : '最近没有执行器命令。' }}</p>
       </section>
     </template>
     <WebsiteDialog v-if="issued" title="令牌已签发" :message="`请立即复制并交给 ${issued.record.employeeId}；关闭后无法再次查看，只能重新签发。`" confirm-label="我已保存" @cancel="closeIssued" @confirm="closeIssued">
@@ -147,7 +186,7 @@ onBeforeUnmount(() => { lifetime.abort(); emit('busy', false) })
 .cloud-manager{min-width:0}.cloud-manager>.editor-heading{padding:0;margin-bottom:20px}.cloud-block{border:1px solid var(--border-default);border-radius:12px;padding:20px 24px;margin-bottom:20px;min-width:0}.cloud-block h3{font-size:16px;margin:0}.cloud-block h3 span{font-weight:400;color:var(--text-secondary);font-size:13px;margin-left:6px}.cloud-block-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px;flex-wrap:wrap}.cloud-block-heading .editor-help{margin:0}
 .cloud-issue fieldset{display:grid;grid-template-columns:minmax(160px,1fr) minmax(160px,1.4fr) 140px auto;gap:14px;align-items:end;margin-top:14px}.cloud-issue label{display:grid;gap:8px;font-size:12px;min-width:0}.cloud-issue .button{min-height:38px}
 .cloud-table{border:1px solid var(--border-default);border-radius:8px;overflow:auto;background:#fff}.cloud-table table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px;line-height:1.5}.cloud-table th,.cloud-table td{padding:10px 14px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--border-subtle);vertical-align:top}.cloud-table th{position:sticky;top:0;background:#f7f8fc;font-weight:600;color:var(--text-secondary);font-size:12px;z-index:1}.cloud-table tbody tr:last-child td{border-bottom:0}.cloud-table small{display:block;font-size:11px;color:var(--text-tertiary);margin-top:4px}.cloud-table code{font-size:11px}.cloud-wrap{white-space:normal;min-width:200px;max-width:420px;overflow-wrap:anywhere}
-.cloud-status{display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;background:#eef0f6;color:var(--text-secondary)}.cloud-status.active,.cloud-status.running,.cloud-status.succeeded{background:#e6f5ec;color:#2f6f4f}.cloud-status.starting,.cloud-status.claimed,.cloud-status.queued,.cloud-status.stopping{background:#fff4dd;color:#7a5b11}.cloud-status.error,.cloud-status.failed,.cloud-status.timed-out{background:#fdecec;color:#9a3c3c}.cloud-status.revoked,.cloud-status.stopped,.cloud-status.cancelled,.cloud-status.expired{background:#eef0f6;color:var(--text-tertiary)}.cloud-error{color:#9a3c3c}
+.cloud-status{display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;background:#eef0f6;color:var(--text-secondary)}.cloud-status.active,.cloud-status.running,.cloud-status.succeeded{background:#e6f5ec;color:#2f6f4f}.cloud-status.starting,.cloud-status.claimed,.cloud-status.queued,.cloud-status.stopping{background:#fff4dd;color:#7a5b11}.cloud-status.error,.cloud-status.failed,.cloud-status.timed-out{background:#fdecec;color:#9a3c3c}.cloud-status.revoked,.cloud-status.stopped,.cloud-status.cancelled,.cloud-status.expired,.cloud-status.closed{background:#eef0f6;color:var(--text-tertiary)}.cloud-status.idle{background:#e8f0fe;color:#2b4c9b}.cloud-error{color:#9a3c3c}
 .cloud-action{border:1px solid var(--border-default);border-radius:6px;padding:6px 10px;background:#fff;color:var(--text-secondary);font:inherit;font-size:12px}.cloud-action.danger{color:#a04848}.cloud-action:hover:not(:disabled){background:#f4f2ff;border-color:#c9c1f2}
 .cloud-run-filter{display:flex;gap:8px;align-items:center}.cloud-run-filter input{height:36px;width:200px}.cloud-run-filter .button{min-height:36px}
 .cloud-token-reveal{display:flex;gap:10px;align-items:center;margin-bottom:12px}.cloud-token-reveal input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;flex:1}.cloud-disabled{padding:24px;border:1px dashed var(--border-default);border-radius:10px}.cloud-disabled strong{display:block;color:var(--text-primary);margin-bottom:8px}.cloud-disabled code{overflow-wrap:anywhere}

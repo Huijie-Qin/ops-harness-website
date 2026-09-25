@@ -146,6 +146,9 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | GET /api/admin/cloud/instances | 每用户云端实例状态、心跳与版本 |
 | POST /api/admin/cloud/instances/:employeeId/stop | 停止实例并吊销其执行器令牌 |
 | GET /api/admin/cloud/runs?employeeId&limit | 最近的云端运行记录 |
+| GET /api/admin/cloud/sessions?employeeId&limit | 云端会话（含取消标记）；POST /api/admin/cloud/sessions/:sessionId/close 关闭会话 |
+| GET /api/admin/cloud/commands?employeeId&limit | 执行器命令队列（状态、领取次数、结果） |
+| GET /api/admin/cloud/workspaces?employeeId | 云端工作区记录与快照信息 |
 
 二进制上传使用 `application/octet-stream`，总超时 30 分钟，空闲超时 60 秒。最多两个并行上传；JSON 仍限制大小并使用 15 秒接收超时。生产网关需要匹配请求大小、超时，并转发原始 Host。备份时保留 `contentDirectory` 和 `releaseDirectory`。详见 [ADR 0013](docs/adr/0013-website-admin-assets-and-releases.md)。
 
@@ -167,7 +170,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 | GET /updates/archive/:version/:platform/:filename | 目录中登记的文件，支持 HEAD、单段 Range、ETag |
 | GET /api/knowledge/metrics | 已上架的指标知识库元数据目录，带 ETag 与 If-None-Match |
 | GET /api/knowledge/metrics/skill | 全部知识库共用的配套技能文件字节，ETag 为内容 SHA-256 |
-| /api/cloud/v1/* | 云端定时任务的用户接口（Bearer 用户令牌）与执行器接口（Bearer 执行器令牌），路径由 `@dsh-ops/cloud-task-contract` 的 `cloudRoutes` 定义；拒绝浏览器来源，`cloud.enabled=false` 时 503 |
+| /api/cloud/v1/* | 云端定时任务、云端工作区与云端会话的用户接口（Bearer 用户令牌）与执行器接口（Bearer 执行器令牌，含命令领取/回报、事件帧上报、快照上传），路径由 `@dsh-ops/cloud-task-contract` 的 `cloudRoutes` 定义；拒绝浏览器来源，`cloud.enabled=false` 时 503 |
 
 安装包支持管理员网页上传发布与原有 CLI 发布，复用同一个发布事务。拒绝目录遍历、非法文件名、符号链接和目录外文件；下载流在连接断开时关闭。安装包可放在官网自己的持久化磁盘，目前不接第三方对象存储/CDN。
 
@@ -244,7 +247,7 @@ pnpm check
 pnpm build
 ```
 
-运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1、tracking 0.1.0 与 cloud-task-contract 0.1.0 制品（后两者依赖 zod 4.4.3，MIT）。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
+运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1、tracking 0.1.0 与 cloud-task-contract 0.2.0 制品（后两者依赖 zod 4.4.3，MIT）。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
 
 Windows x64 上的真实 Desktop 更新烟测由产品仓库执行：先在官网运行 `pnpm build`，再在产品仓库设置 `DSH_OPS_WEBSITE_PROJECT` 为官网的绝对路径并运行 `pnpm desktop:smoke:updates`。这只用于跨仓库集成验收，日常运行不需要该变量。
 
@@ -262,4 +265,6 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 
 官网是终端工作助手“云端定时任务”的控制面与编排器：保存云端任务定义与计划、排队并出租运行、保存结果与产物（7 天）、按工号签发个人访问令牌，并按需拉起/停止每用户一个的隔离云端实例（生产为 Docker 容器，开发联调为本机进程）。官网进程本身不在进程内运行 DSH；实例内的执行器插件只出站：心跳上报可用专家/技能目录、领取运行、无人值守执行、上传产物、上报完成。协议由产品仓库 `packages/shared/cloud-task-contract` 维护，官网使用 vendor 中的精确制品（见 [vendor/README.md](vendor/README.md)）。
 
-配置 `cloud` 节（默认关闭）、令牌签发、Docker/进程后端、目录布局与故障排查见 [云端定时任务运维手册](docs/runbooks/cloud-tasks.md)；决策与边界见 [ADR 0021](docs/adr/0021-cloud-task-execution.md)。管理员 `/admin` 的“云端任务”页签提供令牌签发（明文只显示一次）、令牌吊销、实例列表与停止、最近运行。
+第二期把同一控制面扩展到持久云端工作区与云端会话：用户在自己的实例里创建命名工作区并可请求打包快照下载；发起在云端执行的会话后，实例把 DSH 会话事件原样回传，官网只存储并按序号分页/长轮询转发，本地可追问、取消当前轮、关闭。用户侧的这些动作都变成按用户 FIFO 的执行器命令，实例仍然只出站。
+
+配置 `cloud` 节（默认关闭）、令牌签发、Docker/进程后端、目录布局、第二期接口与状态机、故障排查见 [云端定时任务运维手册](docs/runbooks/cloud-tasks.md)；决策与边界见 [ADR 0021](docs/adr/0021-cloud-task-execution.md)。管理员 `/admin` 的“云端任务”页签提供令牌签发（明文只显示一次）、令牌吊销、实例列表与停止、最近运行、云端会话（可关闭）与执行器命令。
