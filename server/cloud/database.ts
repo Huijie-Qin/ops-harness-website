@@ -53,6 +53,8 @@ const MAX_TASKS_PER_USER = 500
 export const MAX_WORKSPACES_PER_USER = 20
 export const MAX_ACTIVE_SESSIONS_PER_USER = 3
 export const DEFAULT_MAX_EVENTS_PER_SESSION = 50_000
+/** Event arrays leave at least 1 MiB for session metadata inside the product's 4 MiB JSON response limit. */
+export const MAX_SESSION_EVENT_PAGE_BYTES = 3 * 1024 * 1024
 /** A claimed command whose lease expires returns to the queue once; the second expiry fails it. */
 const MAX_COMMAND_ATTEMPTS = 2
 const activeSessionStates: readonly CloudSessionState[] = ['queued', 'starting', 'idle', 'running']
@@ -77,7 +79,14 @@ export class CloudDatabase {
     const file = path.join(directory, 'cloud.sqlite')
     if (lstatSync(directory).isSymbolicLink() || (existsSync(file) && lstatSync(file).isSymbolicLink())) throw new Error('UNSAFE_CLOUD_PATH')
     this.db = new DatabaseSync(file)
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+    try {
+      // Inspect before any schema write: opening an unsupported future database must leave it intact.
+      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").get()) {
+        const version = Number(this.db.prepare('SELECT MAX(version) AS version FROM schema_version').get()?.version)
+        if (version !== 1 && version !== 2) throw new Error('UNSUPPORTED_CLOUD_SCHEMA')
+      }
+      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+      BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
       INSERT OR IGNORE INTO schema_version VALUES(1);
       CREATE TABLE IF NOT EXISTS cloud_tokens(hash TEXT PRIMARY KEY, employee_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, last_used_at TEXT);
@@ -101,9 +110,13 @@ export class CloudDatabase {
       CREATE INDEX IF NOT EXISTS commands_queue ON cloud_commands(employee_id, status, created_at);
       CREATE INDEX IF NOT EXISTS commands_lease ON cloud_commands(status, lease_until);
       INSERT OR IGNORE INTO schema_version VALUES(2);
+      COMMIT;
     `)
-    const version = Number(this.db.prepare('SELECT MAX(version) AS version FROM schema_version').get()?.version)
-    if (version !== 2) throw new Error('UNSUPPORTED_CLOUD_SCHEMA')
+    } catch (error) {
+      try { this.db.exec('ROLLBACK') } catch { /* no transaction was started or it already ended */ }
+      this.db.close()
+      throw error
+    }
   }
 
   private iso(epoch = this.now()) { return new Date(epoch).toISOString() }
@@ -552,10 +565,19 @@ export class CloudDatabase {
   /** Page of relayed frames after `since` (ascending), plus the current session record. */
   sessionEvents(employeeId: string, id: string, since: number, limit: number): SessionEventPage {
     const session = this.session(employeeId, id)
-    const rows = this.db.prepare('SELECT seq, at, frame_json FROM cloud_session_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, since, limit + 1)
-    const page = rows.slice(0, limit)
-    const events = page.map(row => SessionEventSchema.parse({ seq: Number(row.seq), at: row.at, frame: JSON.parse(String(row.frame_json)) }))
-    return { session, events, nextSince: events.length ? events[events.length - 1]!.seq : since, hasMore: rows.length > limit }
+    const rows = this.db.prepare('SELECT seq, at, frame_json FROM cloud_session_events WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').iterate(id, since, limit + 1)
+    const events: CloudSessionEvent[] = []
+    let bytes = 2, hasMore = false // JSON array brackets; include commas and event envelopes below.
+    for (const row of rows) {
+      if (events.length >= limit) { hasMore = true; break }
+      const event = SessionEventSchema.parse({ seq: Number(row.seq), at: row.at, frame: JSON.parse(String(row.frame_json)) })
+      const size = Buffer.byteLength(JSON.stringify(event)) + (events.length ? 1 : 0)
+      // Every accepted frame is at most 512 KiB, so even a maximum-size first frame fits.
+      if (bytes + size > MAX_SESSION_EVENT_PAGE_BYTES) { hasMore = true; break }
+      events.push(event)
+      bytes += size
+    }
+    return { session, events, nextSince: events.length ? events[events.length - 1]!.seq : since, hasMore }
   }
   /**
    * Store a contiguous batch from the executor. Frames already stored (seq ≤ lastSeq, a retry) are ignored; a batch that
@@ -654,6 +676,8 @@ export class CloudDatabase {
   /** Hand the user's oldest queued command to the executor (FIFO); `session.start` moves its session to `starting`. */
   claimCommand(employeeId: string): { command: ExecutorCommand; leaseMs: number } | undefined {
     return this.transaction(() => {
+      // FIFO includes execution: a concurrent poll must not overtake a command whose result is pending.
+      if (this.db.prepare("SELECT 1 FROM cloud_commands WHERE employee_id=? AND status='claimed' LIMIT 1").get(employeeId)) return undefined
       const row = this.db.prepare("SELECT * FROM cloud_commands WHERE employee_id=? AND status='queued' ORDER BY created_at, rowid LIMIT 1").get(employeeId)
       if (!row) return undefined
       const now = this.iso()
@@ -689,6 +713,8 @@ export class CloudDatabase {
       const row = this.db.prepare('SELECT * FROM cloud_commands WHERE id=? AND employee_id=?').get(id, employeeId)
       if (!row) throw new CloudError('NOT_FOUND', 404)
       if (row.status === 'done' || row.status === 'failed') return
+      if (row.status !== 'claimed') throw new CloudError('INVALID_REQUEST', 409, `command is ${String(row.status)}`)
+      if (row.lease_until === null || Date.parse(String(row.lease_until)) <= this.now()) throw new CloudError('INVALID_REQUEST', 409, 'command lease expired')
       const kind = String(row.kind) as CommandKind, sessionId = row.session_id === null ? undefined : String(row.session_id), workspaceId = row.workspace_id === null ? undefined : String(row.workspace_id)
       const now = this.iso()
       if (result.status === 'failed') {
@@ -699,10 +725,11 @@ export class CloudDatabase {
       if (kind === 'workspace.create') {
         if (!result.relativePath) throw new CloudError('INVALID_REQUEST', 400, 'relativePath is required for workspace.create')
         this.db.prepare('UPDATE cloud_workspaces SET relative_path=?, updated_at=? WHERE id=?').run(result.relativePath, now, workspaceId ?? '')
-      } else if (kind === 'workspace.snapshot' && result.artifact !== undefined) {
+      } else if (kind === 'workspace.snapshot') {
+        if (result.artifact === undefined) throw new CloudError('INVALID_REQUEST', 400, 'artifact is required for workspace.snapshot')
         const stored = workspaceId === undefined ? undefined : this.db.prepare('SELECT snapshot_json FROM cloud_workspaces WHERE id=?').get(workspaceId)?.snapshot_json
         const current = stored ? ArtifactInfoSchema.parse(JSON.parse(String(stored))) : undefined
-        if (!current || current.sha256 !== result.artifact.sha256 || current.size !== result.artifact.size) throw new CloudError('ARTIFACT_MISMATCH', 409, 'snapshot result does not match the uploaded archive')
+        if (!current || current.sha256 !== result.artifact.sha256 || current.size !== result.artifact.size || current.fileCount !== result.artifact.fileCount) throw new CloudError('ARTIFACT_MISMATCH', 409, 'snapshot result does not match the uploaded archive')
       } else if (kind === 'session.start') {
         if (!result.instanceSessionId) throw new CloudError('INVALID_REQUEST', 400, 'instanceSessionId is required for session.start')
         this.db.prepare("UPDATE cloud_sessions SET instance_session_id=?, state=CASE WHEN state IN ('queued','starting') THEN 'running' ELSE state END, updated_at=?, last_activity_at=? WHERE id=?").run(result.instanceSessionId, now, now, sessionId ?? '')
@@ -787,7 +814,7 @@ export class CloudDatabase {
         result.expired.push(String(row.id))
       }
       // Command leases: the first expiry returns the command to the queue, the second fails it (and its session).
-      for (const row of this.db.prepare("SELECT id, kind, attempts, session_id FROM cloud_commands WHERE status='claimed' AND lease_until<? LIMIT 500").all(nowIso)) {
+      for (const row of this.db.prepare("SELECT id, kind, attempts, session_id FROM cloud_commands WHERE status='claimed' AND lease_until<=? LIMIT 500").all(nowIso)) {
         const id = String(row.id), kind = String(row.kind) as CommandKind
         if (Number(row.attempts) >= MAX_COMMAND_ATTEMPTS) {
           this.finishCommand(id, { status: 'failed', errorCode: 'command-lease-expired', message: 'the executor did not report a result before the lease expired' }, nowIso)
@@ -795,7 +822,10 @@ export class CloudDatabase {
           result.commandsFailed.push(id)
         } else {
           this.db.prepare("UPDATE cloud_commands SET status='queued', lease_until=NULL, claimed_at=NULL WHERE id=?").run(id)
-          if (kind === 'session.start' && row.session_id !== null) this.db.prepare("UPDATE cloud_sessions SET state='queued', updated_at=? WHERE id=? AND state='starting'").run(nowIso, String(row.session_id))
+          if (kind === 'session.start' && row.session_id !== null) {
+            this.db.prepare("UPDATE cloud_sessions SET state='queued', updated_at=? WHERE id=? AND state='starting'").run(nowIso, String(row.session_id))
+            this.changed.add(String(row.session_id))
+          }
           result.commandsRequeued.push(id)
         }
       }

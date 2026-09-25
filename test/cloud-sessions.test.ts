@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { readdir } from 'node:fs/promises'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import {
@@ -457,4 +457,145 @@ test('schema: a version 1 database upgrades in place to version 2', async t => {
   } finally { upgraded.close() }
   const reopened = new CloudDatabase(directory)
   try { assert.equal(reopened.listWorkspaces(employee).length, 1) } finally { reopened.close() }
+})
+
+test('commands reject unclaimed and expired results and serialize each employee independently', async t => {
+  const { db, clock } = await cloudFixture(t)
+  const firstWorkspace = db.createWorkspace(employee, { name: 'first' })
+  const firstId = db.adminCommands(employee, 1)[0]!.id
+  const result = { status: 'done' as const, errorCode: '', message: '', relativePath: 'workspaces/first' }
+  const conflict = (error: unknown) => error instanceof CloudError && error.status === 409
+  assert.throws(() => db.completeCommand(employee, firstId, result), conflict, 'a queued command has no executor lease')
+  const first = db.claimCommand(employee)!
+  assert.equal(first.command.id, firstId)
+  db.createWorkspace(employee, { name: 'second' })
+  assert.equal(db.claimCommand(employee), undefined, 'a later command cannot overtake the claimed command')
+  db.createWorkspace('other-employee', { name: 'independent' })
+  assert.ok(db.claimCommand('other-employee'), 'one employee does not block another')
+  clock.advance(CLAIM_LEASE_MS)
+  assert.throws(() => db.completeCommand(employee, firstId, result), conflict, 'the deadline itself is expired before the sweep')
+  assert.equal(db.workspace(employee, firstWorkspace.id).relativePath, '')
+  assert.deepEqual(db.advance().commandsRequeued.sort(), [firstId, db.adminCommands('other-employee', 1)[0]!.id].sort())
+  assert.throws(() => db.completeCommand(employee, firstId, result), conflict, 'a late result cannot complete a requeued command')
+  assert.equal(db.claimCommand(employee)?.command.id, firstId, 'retry preserves FIFO')
+  db.completeCommand(employee, firstId, result)
+  assert.equal(db.workspace(employee, firstWorkspace.id).relativePath, result.relativePath)
+  assert.doesNotThrow(() => db.completeCommand(employee, firstId, result), 'acknowledgement retries remain idempotent')
+  assert.equal(db.claimCommand(employee)?.command.workspace?.name, 'second')
+})
+
+test('long-poll readers cannot receive new frames after their user token is revoked or expires', async t => {
+  const f = await httpFixture(t)
+  for (const revocation of ['revoked', 'expired'] as const) {
+    const issued = f.cloud.db.issueToken({ employeeId: employee, kind: 'user', label: revocation, expiresAt: f.cloud.clock.now() + MINUTE })
+    const workspace = f.cloud.db.createWorkspace(employee, { name: revocation })
+    const session = f.cloud.db.createSession(employee, { workspaceId: workspace.id, expertId: 'product-default', prompt: 'sensitive response' })
+    const parked = f.api(`${cloudRoutes.sessionEvents(session.id)}?waitMs=5000`, issued.token)
+    for (let index = 0; index < 100 && f.cloud.runtime.waiters.size === 0; index++) await settle()
+    assert.equal(f.cloud.runtime.waiters.size, 1)
+    if (revocation === 'revoked') f.cloud.db.revokeToken(issued.hash)
+    else f.cloud.clock.advance(MINUTE)
+    f.cloud.db.appendSessionFrames(employee, session.id, [event(1, { secretAfterRevocation: 'do not relay' })])
+    const response = await parked
+    assert.equal(response.status, 401, revocation)
+    assert.deepEqual(await response.json(), { error: 'UNAUTHORIZED' })
+    assert.equal(f.cloud.runtime.waiters.size, 0)
+    f.cloud.db.closeSession(employee, session.id)
+  }
+})
+
+test('workspace snapshot completion must confirm all uploaded metadata', async t => {
+  const { db } = await cloudFixture(t)
+  const workspace = db.createWorkspace(employee, { name: 'snapshot result' })
+  db.completeCommand(employee, db.claimCommand(employee)!.command.id, { status: 'done', errorCode: '', message: '', relativePath: 'workspaces/snapshot' })
+  db.requestWorkspaceSnapshot(employee, workspace.id)
+  const claimed = db.claimCommand(employee)!
+  const artifact = { size: 42, sha256: 'a'.repeat(64), fileCount: 3 }
+  db.setWorkspaceSnapshot(employee, workspace.id, artifact)
+  assert.throws(() => db.completeCommand(employee, claimed.command.id, { status: 'done', errorCode: '', message: '' }), (error: unknown) => error instanceof CloudError && error.status === 400)
+  assert.throws(() => db.completeCommand(employee, claimed.command.id, { status: 'done', errorCode: '', message: '', artifact: { ...artifact, fileCount: 2 } }), (error: unknown) => error instanceof CloudError && error.code === 'ARTIFACT_MISMATCH')
+  db.completeCommand(employee, claimed.command.id, { status: 'done', errorCode: '', message: '', artifact })
+})
+
+test('deleting a workspace during its snapshot upload does not leave an orphan archive', async t => {
+  const f = await httpFixture(t)
+  const token = await f.issue(), executor = await f.executor()
+  const workspace = await readyWorkspace(f, token, executor)
+  const bytes = Buffer.from('PK archive still being uploaded')
+  const req = httpRequest(f.origin + cloudRoutes.executorWorkspaceSnapshot(workspace.id), { method: 'PUT', headers: {
+    Authorization: `Bearer ${executor}`, 'Content-Type': 'application/zip', 'Content-Length': bytes.length,
+    'X-Artifact-Sha256': createHash('sha256').update(bytes).digest('hex'),
+  } })
+  t.after(() => req.destroy())
+  const response = once(req, 'response')
+  req.write(bytes.subarray(0, 3))
+  const artifacts = path.join(f.cloud.root, 'cloud', 'artifacts')
+  for (let index = 0; index < 100 && !(await readdir(artifacts)).some(name => name.endsWith('.upload')); index++) await settle()
+  assert.ok((await readdir(artifacts)).some(name => name.endsWith('.upload')), 'upload has entered the archive store')
+  assert.equal((await f.api(cloudRoutes.workspace(workspace.id), token, { method: 'DELETE' })).status, 204)
+  req.end(bytes.subarray(3))
+  const [res] = await response
+  res.resume()
+  await once(res, 'end')
+  assert.equal(res.statusCode, 404)
+  assert.deepEqual(await readdir(artifacts), [], 'a deleted workspace must not publish a late snapshot')
+})
+
+test('schema rejects a newer database without installing phase 2 tables into it', async t => {
+  const { root } = await cloudFixture(t)
+  const directory = path.join(root, 'future')
+  const { mkdirSync } = await import('node:fs')
+  mkdirSync(directory)
+  const file = path.join(directory, 'cloud.sqlite')
+  const future = new DatabaseSync(file)
+  future.exec('CREATE TABLE schema_version(version INTEGER PRIMARY KEY); INSERT INTO schema_version VALUES(3)')
+  future.close()
+  assert.throws(() => new CloudDatabase(directory), /UNSUPPORTED_CLOUD_SCHEMA/)
+  const verify = new DatabaseSync(file)
+  try {
+    assert.deepEqual(verify.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => row.name), ['schema_version'])
+    assert.deepEqual(verify.prepare('SELECT version FROM schema_version ORDER BY version').all().map(row => Number(row.version)), [3])
+  } finally { verify.close() }
+})
+
+test('session event pages keep 200 small frames but bound large frames by UTF-8 bytes without gaps', async t => {
+  const f = await httpFixture(t)
+  const token = await f.issue(), executor = await f.executor()
+  const workspace = await readyWorkspace(f, token, executor)
+  const small = f.cloud.db.createSession(employee, { workspaceId: workspace.id, expertId: 'product-default', prompt: 'small frames' })
+  assert.equal((await f.frames(executor, small.id, Array.from({ length: 200 }, (_, index) => event(index + 1)))).status, 200)
+  assert.equal((await f.frames(executor, small.id, [event(201)])).status, 200)
+  const first = await (await f.api(`${cloudRoutes.sessionEvents(small.id)}?limit=200`, token)).json() as { events: CloudSessionEvent[]; nextSince: number; hasMore: boolean }
+  assert.equal(first.events.length, 200, 'small frames retain the protocol page size')
+  assert.equal(first.nextSince, 200)
+  assert.equal(first.hasMore, true)
+  const last = await (await f.api(`${cloudRoutes.sessionEvents(small.id)}?since=200&limit=200`, token)).json() as { events: CloudSessionEvent[]; nextSince: number; hasMore: boolean }
+  assert.deepEqual(last.events.map(item => item.seq), [201]); assert.equal(last.hasMore, false)
+
+  const large = f.cloud.db.createSession(employee, { workspaceId: workspace.id, expertId: 'product-default', prompt: 'large frames' })
+  const frame = { type: 'event', text: '' }
+  const remaining = MAX_EVENT_FRAME_BYTES - Buffer.byteLength(JSON.stringify(frame))
+  frame.text = '汉'.repeat(Math.floor(remaining / 3)) + 'x'.repeat(remaining % 3)
+  assert.equal(Buffer.byteLength(JSON.stringify(frame)), MAX_EVENT_FRAME_BYTES, 'each frame is the maximum legal byte size')
+  assert.equal((await f.frames(executor, large.id, Array.from({ length: 12 }, (_, index) => event(index + 1, frame)))).status, 200)
+  const sequence: number[] = []
+  let since = 0, pages = 0
+  while (since < 12) {
+    const response = await f.api(`${cloudRoutes.sessionEvents(large.id)}?since=${since}&limit=200`, token)
+    assert.equal(response.status, 200)
+    const body = await response.text()
+    assert.ok(Buffer.byteLength(body) < 4 * 1024 * 1024, 'the response fits the product JSON reader')
+    const page = JSON.parse(body) as { events: CloudSessionEvent[]; nextSince: number; hasMore: boolean }
+    assert.ok(page.events.length > 0, 'a maximum-size legal frame cannot stall the cursor')
+    assert.ok(Buffer.byteLength(JSON.stringify(page.events)) <= 3 * 1024 * 1024, 'event array has a 3 MiB byte budget')
+    assert.deepEqual(page.events.map(item => item.seq), Array.from({ length: page.events.length }, (_, index) => since + index + 1))
+    assert.equal(page.nextSince, page.events.at(-1)!.seq)
+    assert.equal(page.hasMore, page.nextSince < 12)
+    sequence.push(...page.events.map(item => item.seq))
+    since = page.nextSince; pages++
+  }
+  assert.ok(pages > 1)
+  assert.deepEqual(sequence, Array.from({ length: 12 }, (_, index) => index + 1))
+  const exhausted = await (await f.api(`${cloudRoutes.sessionEvents(large.id)}?since=12`, token)).json() as { events: CloudSessionEvent[]; nextSince: number; hasMore: boolean }
+  assert.deepEqual(exhausted.events, []); assert.equal(exhausted.nextSince, 12); assert.equal(exhausted.hasMore, false)
 })

@@ -1,6 +1,6 @@
 # 云端定时任务：控制面与编排器运维
 
-官网作为终端工作助手"云端定时任务"的控制面与编排器（决策见 [ADR 0021](../adr/0021-cloud-task-execution.md)）。本手册覆盖配置、令牌签发、两种实例后端、目录布局与故障排查；第二期（持久云端工作区、云端会话、执行器命令队列与事件回传）见文末专节。协议以 vendor 中的 `@dsh-ops/cloud-task-contract`（0.2.0，contractVersion 1）为准，路径前缀 `/api/cloud/v1`。
+官网作为终端工作助手"云端定时任务"的控制面与编排器（决策见 [ADR 0021](../adr/0021-cloud-task-execution.md)）。本手册覆盖配置、令牌签发、两种实例后端、目录布局与故障排查；第二期（持久云端工作区、云端会话、执行器命令队列与事件回传）见文末专节。协议以 vendor 中的 `@dsh-ops/cloud-task-contract`（0.2.1，contractVersion 1）为准，路径前缀 `/api/cloud/v1`。
 
 ## 配置
 
@@ -102,7 +102,7 @@
   instances/<工号>/instance.log   # 仅进程后端
 ```
 
-首次用 0.2.0 版官网打开旧的 `cloud.sqlite`（schema 1）时会原地追加第二期的表并把 schema 记为 2；升级只增表不改旧表，可重复执行。
+首次用第二期官网（cloud-task-contract 0.2.1）打开旧的 `cloud.sqlite`（schema 1）时会在事务中原地追加第二期的表并把 schema 记为 2；升级只增表不改旧表，可重复执行。不支持的数据库版本在任何 schema 写入前拒绝，迁移出错则回滚并停止启动。
 
 备份 `cloud.directory` 整体（含 SQLite WAL/SHM）。删除某个用户的实例数据前先在后台停止实例。
 
@@ -159,17 +159,17 @@
 | `POST /sessions/:id/prompt` | 追问 → 202；只在 `idle`/`running` 允许（其余 409 `INVALID_REQUEST`），`mode` 原样交给执行器 |
 | `POST /sessions/:id/cancel` | 取消当前轮 → 200；允许 `starting|idle|running`；置 `cancelRequested`（下一次帧上报响应里可见）并排入 `session.cancel` |
 | `POST /sessions/:id/close` | 关闭 → 200；`queued` 直接 `closed`（其 `session.start` 记为失败 `session-closed`），其余排入 `session.close`，执行器确认后才 `closed`；终态重复调用幂等 |
-| `GET /sessions/:id/events?since&waitMs&limit` | 事件页：`since` 之后的帧（升序，`limit` ≤ 200）；没有新帧且 `waitMs`>0（≤ 30 000）时长轮询，帧到达、状态变化或取消标记变化都会唤醒；会话已终态时立即返回。响应 `{ session, events, nextSince, hasMore }` |
+| `GET /sessions/:id/events?since&waitMs&limit` | 事件页：`since` 之后的连续帧（升序，`limit` ≤ 200），事件 JSON 数组同时受 3 MiB 字节预算限制；小帧可一次返回 200 条，最大合法帧也能前进至少一条。`nextSince` 为最后实际返回的 seq，达到条数或字节预算而仍有后续帧时 `hasMore=true`。没有新帧且 `waitMs`>0（≤ 30 000）时长轮询，帧到达、状态变化或取消标记变化都会唤醒；会话已终态时立即返回。等待结束后重新鉴权，期间令牌吊销或到期返回 401。响应 `{ session, events, nextSince, hasMore }` |
 
 ### 执行器接口（Bearer 执行器令牌）
 
 | 接口 | 语义 |
 | --- | --- |
-| `POST /executor/commands/claim {instanceId}` | 领取本用户最早的 `queued` 命令 → 200 `{ command, leaseMs }`，无命令 204。`session.*` 带当前 `session`，`session.start` 与 `workspace.*` 带 `workspace`，`session.start`/`session.prompt` 带 `prompt`（后者还带 `mode`）。执行器应在同一轮询周期里先领命令再领运行 |
-| `POST /executor/commands/:id/result` | 回报 `{ status: done\|failed, errorCode, message, relativePath?, artifact?, instanceSessionId? }` → 204。`done`：`workspace.create` 必须带 `relativePath`；`session.start` 必须带 `instanceSessionId`；`workspace.snapshot` 若带 `artifact` 必须与已上传快照一致（否则 409 `ARTIFACT_MISMATCH`）；`session.close` 把会话置 `closed`；`session.cancel` 清 `cancelRequested`。`failed`：会话命令把会话标 `failed`（错误码来自回报），工作区命令只记录。对已结束命令重复回报是无害的 no-op（204）。`session.prompt` 应在 DSH 接受提示后立即回报，不等待整轮结束 |
+| `POST /executor/commands/claim {instanceId}` | 领取本用户最早的 `queued` 命令 → 200 `{ command, leaseMs }`，无命令或本用户已有 `claimed` 命令时返回 204，防止并发轮询越过先前命令。`session.*` 带当前 `session`，`session.start` 与 `workspace.*` 带 `workspace`，`session.start`/`session.prompt` 带 `prompt`（后者还带 `mode`）。执行器应在同一轮询周期里先领命令再领运行 |
+| `POST /executor/commands/:id/result` | 回报 `{ status: done\|failed, errorCode, message, relativePath?, artifact?, instanceSessionId? }` → 204。必须仍为 `claimed` 且租约未到期，否则 409 `INVALID_REQUEST`。`done`：`workspace.create` 必须带 `relativePath`；`session.start` 必须带 `instanceSessionId`；`workspace.snapshot` 必须带 `artifact`，SHA-256、字节数和文件数均须与已上传快照一致（否则 409 `ARTIFACT_MISMATCH`）；`session.close` 把会话置 `closed`；`session.cancel` 清 `cancelRequested`。`failed`：会话命令把会话标 `failed`（错误码来自回报），工作区命令只记录。对已结束命令重复回报是无害的 no-op（204）。`session.prompt` 应在 DSH 接受提示后立即回报，不等待整轮结束 |
 | `POST /executor/sessions/:id/frames { events }` | 连续帧批次（`seq` 必须接续官网 `lastSeq`；已存的 seq 被忽略、可安全重发；起始 seq 跳号 → 409 `INVALID_REQUEST`，消息含 `lastSeq=N`；批内不连续 → 400；单帧超 512 KiB → 413）。响应 `{ lastSeq, cancelRequested }`。`cancelRequested` 不因上报而清零，只由 `session.cancel` 结果或非 `running` 的状态上报清零。会话 `failed` 后拒收 |
 | `POST /executor/sessions/:id/status` | `{ state: idle\|running\|closed\|failed, turns?, errorCode, errorMessage }` → 200 `{session}`；终态会话忽略后续上报。`closed`/`failed` 会把该会话尚未领取/完成的命令记为失败 |
-| `PUT /executor/workspaces/:id/snapshot` | zip 上传（`content-type: application/zip`，头 `x-artifact-sha256` 必填、`x-artifact-file-count` 可选）→ 200 `{workspace}`；覆盖上一份快照 |
+| `PUT /executor/workspaces/:id/snapshot` | zip 上传（`content-type: application/zip`，头 `x-artifact-sha256` 必填、`x-artifact-file-count` 可选）→ 200 `{workspace}`；覆盖上一份快照。上传期间工作区被删除则返回 404，并清理晚到归档 |
 
 每次领取命令、帧上报、状态上报、快照上传都会刷新实例的最近活动时间。
 
@@ -180,6 +180,8 @@
 - 管理台"云端任务"页签新增"云端会话"与"执行器命令"两张表（随工号筛选），会话行可"关闭"（等价于用户侧 close）。
 
 ## 验证记录与剩余边界
+
+第二期于 2026-09-25 使用本机 Docker 和真实 DeepSeek 模型完成跨仓验收：创建持久工作区、同一 DSH 会话续聊与工具调用、取消/关闭、快照下载与用户隔离、原工作区跨容器重建持久化、定时任务与会话共存、官网离线 46 秒后的状态与帧补偿、本地 Runtime 离线期间继续执行，以及空闲实例自动停止。产品与管理员页面完成真实浏览器验收，稳定态 Console 均为 0 errors / 0 warnings；本仓 `pnpm check` 133/133、构建通过。完整白盒流程、最终镜像、复现修复与证据索引见[第二期 Docker 验收报告](https://github.com/Huijie-Qin/ops-harness/blob/9cc685f5228a2b7d5ac92c8cbaea8804d27bec1f/docs/qa/cloud-sessions-docker-e2e-2026-09-25.md)。
 
 初版历史环境为无 Docker 的 Windows ARM64 开发机：当时 Docker 编排只通过假 Engine API 单元测试，未完成真实镜像构建、容器拉起与休眠唤醒。进程后端当时使用假 dsh 入口验证初始化、启动参数、就绪判定与停止行为，该记录不代表真实产品 Runtime 已通过。
 

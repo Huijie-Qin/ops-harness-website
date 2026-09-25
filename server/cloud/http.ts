@@ -150,13 +150,16 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
         throw new CloudError('UNAUTHORIZED', 401)
       }
       inflight++
-      try { await dispatch(runtime, match.route.name, match.params, principal.employeeId, req, res, url) }
+      const reauthenticate = () => {
+        if (runtime.db.authenticate(token, kind)?.employeeId !== principal.employeeId) throw new CloudError('UNAUTHORIZED', 401)
+      }
+      try { await dispatch(runtime, match.route.name, match.params, principal.employeeId, req, res, url, reauthenticate) }
       finally { inflight-- }
     } catch (error) { fail(res, error) }
     return true
   }
 
-  const dispatch = async (cloud: CloudRuntime, name: RouteName, params: string[], employeeId: string, req: IncomingMessage, res: ServerResponse, url: URL) => {
+  const dispatch = async (cloud: CloudRuntime, name: RouteName, params: string[], employeeId: string, req: IncomingMessage, res: ServerResponse, url: URL, reauthenticate: () => void) => {
     const { db } = cloud
     switch (name) {
       case 'me': return json(res, MeResponseSchema.parse({ contractVersion: CONTRACT_VERSION, employeeId, displayName: '', instance: db.instanceStatus(employeeId) }))
@@ -271,6 +274,8 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
           inflight--
           try { await cloud.waiters.wait(id, query.waitMs, res) } finally { inflight++ }
           if (res.destroyed || res.writableEnded) return
+          // The user's credential can be revoked or expire while this response is parked.
+          reauthenticate()
           page = db.sessionEvents(employeeId, id, query.since, query.limit)
         }
         return json(res, SessionEventsResponseSchema.parse(page))
@@ -301,7 +306,13 @@ export function createCloudHandlers(runtime: CloudRuntime | undefined, options: 
         const { sha256, fileCount } = artifactHeaders(req)
         db.workspace(employeeId, id)
         const received = await cloud.artifacts.receive(req, workspaceSnapshotKey(id), sha256)
-        return json(res, WorkspaceResponseSchema.parse({ workspace: db.setWorkspaceSnapshot(employeeId, id, { size: received.size, sha256: received.sha256, fileCount }) }))
+        try {
+          return json(res, WorkspaceResponseSchema.parse({ workspace: db.setWorkspaceSnapshot(employeeId, id, { size: received.size, sha256: received.sha256, fileCount }) }))
+        } catch (error) {
+          // A user can delete the workspace while its archive is still streaming in.
+          if (error instanceof CloudError && error.code === 'NOT_FOUND') await cloud.artifacts.remove(workspaceSnapshotKey(id))
+          throw error
+        }
       }
     }
   }
