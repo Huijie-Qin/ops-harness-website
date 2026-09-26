@@ -8,15 +8,18 @@ import { decideUpdate, readCatalog, visibleReleases } from './catalog.js'
 import { serveFile } from './files.js'
 import { GuideError } from './guide-store.js'
 import type { KnowledgeStore } from './knowledge-store.js'
+import type { ExpertStore } from './expert-store.js'
+import { createExpertPublicHandler } from './expert-http.js'
 
 type DevMiddleware = (req: IncomingMessage, res: ServerResponse, next: () => void) => void
-export function createHandler(config: WebsiteConfig, options: { clientRoot: string; adminIconHash?: string; dev?: DevMiddleware; guide?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>; knowledge?: KnowledgeStore; now?: () => number; onError?: (error: unknown) => void }) {
+export function createHandler(config: WebsiteConfig, options: { clientRoot: string; adminIconHash?: string; dev?: DevMiddleware; guide?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>; knowledge?: KnowledgeStore; experts?: ExpertStore; now?: () => number; onError?: (error: unknown) => void }) {
   if (options.adminIconHash && !/^[A-Za-z0-9+/]{43}=$/.test(options.adminIconHash)) throw new Error('Invalid administrator icon hash')
   const json = (req: IncomingMessage, res: ServerResponse, code: number, data: unknown) => {
     const body = JSON.stringify(data)
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' })
     res.end(req.method === 'HEAD' ? undefined : body)
   }
+  const experts = options.experts ? createExpertPublicHandler(options.experts, options.now ? { now: options.now } : {}) : undefined
   return async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'no-referrer')
@@ -98,6 +101,7 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
         }
         return
       }
+      if (experts && await experts(req, res, url)) return
       if (url.pathname.startsWith('/api/')) { json(req, res, 404, { error: 'NOT_FOUND' }); return }
       if (options.dev) {
         options.dev(req, res, () => json(req, res, 404, { error: 'NOT_FOUND' })); return

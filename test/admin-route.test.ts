@@ -4,7 +4,7 @@ import { adminHash, parseAdminHash } from '../client/admin-route.js'
 import { analyticsQuery, readAnalyticsState } from '../client/analytics/state.js'
 
 test('admin fragments round-trip sections, document selection and analytics context', () => {
-  for (const hash of ['#guides/installation','#documents','#releases','#media','#knowledge','#analytics/conversations?from=2026-08-23&to=2026-09-20&environment=all&page=3&limit=25']) {
+  for (const hash of ['#guides/installation','#documents','#releases','#media','#knowledge','#experts','#analytics/conversations?from=2026-08-23&to=2026-09-20&environment=all&page=3&limit=25']) {
     assert.equal(adminHash(parseAdminHash(hash)),hash)
   }
   const source=readAnalyticsState('from=2026-08-23&to=2026-09-20&environment=development&page=3&limit=25&search=%E6%9E%97&sort=totalTokens&direction=asc&user=12345678-1234-4234-9234-123456789abc')
