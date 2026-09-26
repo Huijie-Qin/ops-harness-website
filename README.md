@@ -159,6 +159,9 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 | GET /updates/archive/:version/:platform/:filename | 目录中登记的文件，支持 HEAD、单段 Range、ETag |
 | GET /api/knowledge/metrics | 已上架的指标知识库元数据目录，带 ETag 与 If-None-Match |
 | GET /api/knowledge/metrics/skill | 全部知识库共用的配套技能文件字节，ETag 为内容 SHA-256 |
+| GET /api/experts/v1/catalog | 当前工号可见的云端专家目录与这些专家引用的自定义工具定义（工号放在 `X-Ops-Employee-Id` 请求头），ETag 按工号区分 |
+| GET /api/experts/v1/experts/:id/versions/:n/responsibility | 已发布版本的职责全文，不可见一律 404 |
+| GET /api/experts/v1/experts/:id/versions/:n/skills/:name | 已发布版本的技能文件字节，带 `X-Skill-Sha256` |
 
 安装包支持管理员网页上传发布与原有 CLI 发布，复用同一个发布事务。拒绝目录遍历、非法文件名、符号链接和目录外文件；下载流在连接断开时关闭。安装包可放在官网自己的持久化磁盘，目前不接第三方对象存储/CDN。
 
@@ -227,6 +230,29 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 - 校验通过后按内容 SHA-256 落盘为 `skills/<sha256>.<zip|md>`；已存在同哈希文件时直接复用，不重写。
 
 错误码：`INVALID_KNOWLEDGE` 400、`KNOWLEDGE_NOT_FOUND` 404、`KNOWLEDGE_ID_TAKEN` 409、`TENANT_ID_TAKEN` 409、`KNOWLEDGE_LIMIT` 409、`INVALID_SKILL_FILE` 400、`SKILL_NOT_FOUND` 404、`REVISION_CONFLICT` 409。详见 [ADR 0018](docs/adr/0018-metric-knowledge-catalog.md)。
+
+## 专家分发（云端专家）
+
+管理员在 `/admin` 的“专家分发”页签导入创建者从工作助手导出的专家包（`*.expert.zip`），或直接新建、编辑专家；设置可见范围后发布，
+可见范围内同事的工作助手在下次同步时收到（打开专家页即同步）。设计与取舍见 [ADR 0022](docs/adr/0022-expert-distribution.md)，
+产品侧见产品仓库 ADR 0026；日常操作、备份与排查见 [专家分发运维](docs/runbooks/expert-distribution.md)。
+
+- **存储**：`<contentDirectory>/experts/` 下的 `catalog.json`、不可覆盖的 `versions/<专家 ID>/<版本>.json`、按内容哈希保存的
+  `skills/`、待确认的 `imports/`（24 小时后清理）与 `.trash/`。备份内容目录即可完整恢复。
+- **导入**：上传后先出预览（目标、变化、警告与错误），确认后写入草稿，可选“导入并发布”。同一来源（导出人工号 + 本机专家 ID）
+  再次导入时自动选中原专家。专家包上限 110 MiB、64 个条目；每个技能不超过 5 MiB。
+- **可见范围**：上架 / 下架、全员或指定工号（最多 2000 个，不区分大小写），保存即生效；负责人始终可见；新建专家默认未上架、只有负责人可见。
+- **自定义工具库**：`experts/tools.json`，“自定义工具”页签管理（`GET /api/admin/expert-tools`、`PUT` / `DELETE /api/admin/expert-tools/:key`）。
+  导入时按服务名复用或新增，同名不同配置由管理员选择“更新已有工具”或“改名后新增”；保存即对所有引用它的专家生效；
+  被专家引用的工具不能删除。只保存凭据项的名称与获取说明，令牌由每位使用者首次使用时在自己电脑上填写。
+- **安全**：公开接口只读，拒绝浏览器来源（403）、按来源限流、工号不写普通日志；专家包与目录中不含任何令牌、Authorization 头或知识库正文。
+  官网不下发专家组合文件，端侧只按声明开关五组基础能力。
+- **契约**：结构来自产品仓库的 `@dsh-ops/expert-distribution-contract`，以 vendor 制品锁定版本（来源见
+  `vendor/expert-distribution-contract.json`）；契约变更时按 `vendor/README.md` 重新打包并更新锁文件。
+
+错误码：`INVALID_EXPERT_PACKAGE` 400、`EXPERT_PACKAGE_REJECTED` 400、`IMPORT_NOT_FOUND` 404、`EXPERT_NOT_FOUND` 404、
+`EXPERT_SKILL_NOT_FOUND` 404、`NOTHING_TO_PUBLISH` 409、`INVALID_EMPLOYEE_ID` 400、`BROWSER_REJECTED` 403、`REVISION_CONFLICT` 409、
+`INVALID_EXPERT_TOOL` 400、`EXPERT_TOOL_NOT_FOUND` 404、`EXPERT_TOOL_IN_USE` 409。
 
 ## 验证与依赖
 

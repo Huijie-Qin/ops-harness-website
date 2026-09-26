@@ -123,3 +123,17 @@ test('bundled tracking contract matches its provenance and contains no DSH impor
   assert.equal(contracts.CATALOG_VERSION, 3)
   assert.equal(contracts.featureFor('page.view', undefined, { pageKey: 'tool-market' }), 'tools')
 })
+
+test('bundled expert distribution contract matches its provenance and installed package', async () => {
+  const record = JSON.parse(await readFile(new URL('../vendor/expert-distribution-contract.json', import.meta.url), 'utf8'))
+  const bytes = await readFile(new URL(`../vendor/${record.artifact}`, import.meta.url))
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), record.sha256)
+  assert.ok(record.artifact.endsWith(`-${record.sha256.slice(0, 12)}.tgz`))
+  const installed = JSON.parse(await readFile(new URL('../node_modules/@dsh-ops/expert-distribution-contract/package.json', import.meta.url), 'utf8'))
+  assert.equal(installed.name, record.name)
+  assert.equal(installed.version, record.version)
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.dependencies[record.name], `file:vendor/${record.artifact}`)
+  const contract = await import('@dsh-ops/expert-distribution-contract')
+  assert.equal(contract.CONTRACT_VERSION, record.contractVersion)
+})

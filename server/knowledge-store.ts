@@ -88,78 +88,82 @@ export function parseSkillFrontmatter(bytes: Buffer): { name: string; descriptio
   return { name, description: description.trim() }
 }
 
-type ArchiveEntry = { name: string; method: number; compressed: number; size: number; crc: number; offset: number }
-function archiveName(name: string) {
-  if (!name || name.length > 255 || name.includes('\\') || name.includes('\0') || /^[A-Za-z]:/.test(name)) return fail('INVALID_SKILL_FILE')
+export type ArchiveEntry = { name: string; method: number; compressed: number; size: number; crc: number; offset: number }
+/** Bounds of one archive read and the error it fails with; the defaults are the companion Skill limits. */
+export type ArchiveLimits = { maxBytes: number; maxEntries: number; maxExtractedBytes: number; code: string }
+const skillArchiveLimits: ArchiveLimits = { maxBytes: maxSkillFileBytes, maxEntries: maxSkillArchiveEntries, maxExtractedBytes: maxSkillArchiveBytes, code: 'INVALID_SKILL_FILE' }
+function archiveName(name: string, code: string) {
+  if (!name || name.length > 255 || name.includes('\\') || name.includes('\0') || /^[A-Za-z]:/.test(name)) return fail(code)
   const segments = name.split('/')
-  if (segments.length > 16) return fail('INVALID_SKILL_FILE')
+  if (segments.length > 16) return fail(code)
   segments.forEach((segment, index) => {
-    if (segment === '.' || segment === '..') return fail('INVALID_SKILL_FILE')
-    if (!segment && index !== segments.length - 1) return fail('INVALID_SKILL_FILE')
+    if (segment === '.' || segment === '..') return fail(code)
+    if (!segment && index !== segments.length - 1) return fail(code)
   })
   return name
 }
 // Minimal central-directory reader: stored and deflate only, no zip64, encryption, spanning or path escapes.
-export function readArchive(bytes: Buffer): ArchiveEntry[] {
-  if (bytes.length < 22 || bytes.length > maxSkillFileBytes) return fail('INVALID_SKILL_FILE')
+export function readArchive(bytes: Buffer, limits: ArchiveLimits = skillArchiveLimits): ArchiveEntry[] {
+  const fail = (code = limits.code): never => { throw new GuideError(code, 400) }
+  if (bytes.length < 22 || bytes.length > limits.maxBytes) return fail()
   let eocd = -1
   for (let i = bytes.length - 22; i >= 0 && i >= bytes.length - 22 - 0xffff; i--) if (bytes.readUInt32LE(i) === 0x06054b50) { eocd = i; break }
-  if (eocd < 0) return fail('INVALID_SKILL_FILE')
-  if (eocd + 22 + bytes.readUInt16LE(eocd + 20) !== bytes.length) return fail('INVALID_SKILL_FILE')
-  if (eocd >= 20 && bytes.readUInt32LE(eocd - 20) === 0x07064b50) return fail('INVALID_SKILL_FILE')
+  if (eocd < 0) return fail()
+  if (eocd + 22 + bytes.readUInt16LE(eocd + 20) !== bytes.length) return fail()
+  if (eocd >= 20 && bytes.readUInt32LE(eocd - 20) === 0x07064b50) return fail()
   const disk = bytes.readUInt16LE(eocd + 4), start = bytes.readUInt16LE(eocd + 6)
   const local = bytes.readUInt16LE(eocd + 8), total = bytes.readUInt16LE(eocd + 10)
   const size = bytes.readUInt32LE(eocd + 12), offset = bytes.readUInt32LE(eocd + 16)
-  if (disk !== 0 || start !== 0 || local !== total) return fail('INVALID_SKILL_FILE')
-  if (total === 0xffff || size === 0xffffffff || offset === 0xffffffff) return fail('INVALID_SKILL_FILE')
-  if (!total || total > maxSkillArchiveEntries || offset + size !== eocd) return fail('INVALID_SKILL_FILE')
+  if (disk !== 0 || start !== 0 || local !== total) return fail()
+  if (total === 0xffff || size === 0xffffffff || offset === 0xffffffff) return fail()
+  if (!total || total > limits.maxEntries || offset + size !== eocd) return fail()
   const entries: ArchiveEntry[] = []
   const names = new Set<string>()
   let cursor = offset, extracted = 0
   for (let index = 0; index < total; index++) {
-    if (cursor + 46 > eocd || bytes.readUInt32LE(cursor) !== 0x02014b50) return fail('INVALID_SKILL_FILE')
+    if (cursor + 46 > eocd || bytes.readUInt32LE(cursor) !== 0x02014b50) return fail()
     const flags = bytes.readUInt16LE(cursor + 8), method = bytes.readUInt16LE(cursor + 10)
     const crc = bytes.readUInt32LE(cursor + 16), compressed = bytes.readUInt32LE(cursor + 20), plain = bytes.readUInt32LE(cursor + 24)
     const nameLength = bytes.readUInt16LE(cursor + 28), extraLength = bytes.readUInt16LE(cursor + 30), commentLength = bytes.readUInt16LE(cursor + 32)
     const entryDisk = bytes.readUInt16LE(cursor + 34), external = bytes.readUInt32LE(cursor + 38), header = bytes.readUInt32LE(cursor + 42)
     const next = cursor + 46 + nameLength + extraLength + commentLength
-    if (next > eocd) return fail('INVALID_SKILL_FILE')
-    if (flags & 0x1 || flags & 0x40 || flags & 0x2000) return fail('INVALID_SKILL_FILE')
-    if (method !== 0 && method !== 8) return fail('INVALID_SKILL_FILE')
-    if (entryDisk !== 0 || compressed === 0xffffffff || plain === 0xffffffff || header === 0xffffffff) return fail('INVALID_SKILL_FILE')
-    if ((external >>> 16 & 0xf000) === 0xa000) return fail('INVALID_SKILL_FILE')
-    const name = archiveName(bytes.toString('utf8', cursor + 46, cursor + 46 + nameLength))
+    if (next > eocd) return fail()
+    if (flags & 0x1 || flags & 0x40 || flags & 0x2000) return fail()
+    if (method !== 0 && method !== 8) return fail()
+    if (entryDisk !== 0 || compressed === 0xffffffff || plain === 0xffffffff || header === 0xffffffff) return fail()
+    if ((external >>> 16 & 0xf000) === 0xa000) return fail()
+    const name = archiveName(bytes.toString('utf8', cursor + 46, cursor + 46 + nameLength), limits.code)
     const directory = name.endsWith('/')
-    if (flags & 0x8 && !directory && (!compressed || !plain)) return fail('INVALID_SKILL_FILE')
-    if (directory && plain) return fail('INVALID_SKILL_FILE')
+    if (flags & 0x8 && !directory && (!compressed || !plain)) return fail()
+    if (directory && plain) return fail()
     for (let extra = cursor + 46 + nameLength; extra + 4 <= cursor + 46 + nameLength + extraLength; extra += 4 + bytes.readUInt16LE(extra + 2)) {
-      if (bytes.readUInt16LE(extra) === 0x0001) return fail('INVALID_SKILL_FILE')
+      if (bytes.readUInt16LE(extra) === 0x0001) return fail()
     }
-    if (names.has(name)) return fail('INVALID_SKILL_FILE')
+    if (names.has(name)) return fail()
     names.add(name)
     extracted += plain
-    if (extracted > maxSkillArchiveBytes) return fail('INVALID_SKILL_FILE')
-    if (header + 30 > offset) return fail('INVALID_SKILL_FILE')
+    if (extracted > limits.maxExtractedBytes) return fail()
+    if (header + 30 > offset) return fail()
     entries.push({ name, method, compressed, size: plain, crc, offset: header })
     cursor = next
   }
-  if (cursor !== eocd) return fail('INVALID_SKILL_FILE')
+  if (cursor !== eocd) return fail()
   return entries
 }
-export function extractArchiveEntry(bytes: Buffer, entry: ArchiveEntry): Buffer {
+export function extractArchiveEntry(bytes: Buffer, entry: ArchiveEntry, code = 'INVALID_SKILL_FILE'): Buffer {
   const at = entry.offset
-  if (at + 30 > bytes.length || bytes.readUInt32LE(at) !== 0x04034b50) return fail('INVALID_SKILL_FILE')
+  if (at + 30 > bytes.length || bytes.readUInt32LE(at) !== 0x04034b50) return fail(code)
   const flags = bytes.readUInt16LE(at + 6), method = bytes.readUInt16LE(at + 8)
   const nameLength = bytes.readUInt16LE(at + 26), extraLength = bytes.readUInt16LE(at + 28)
-  if (flags & 0x1 || method !== entry.method) return fail('INVALID_SKILL_FILE')
-  if (bytes.toString('utf8', at + 30, at + 30 + nameLength) !== entry.name) return fail('INVALID_SKILL_FILE')
+  if (flags & 0x1 || method !== entry.method) return fail(code)
+  if (bytes.toString('utf8', at + 30, at + 30 + nameLength) !== entry.name) return fail(code)
   const from = at + 30 + nameLength + extraLength
-  if (from + entry.compressed > bytes.length) return fail('INVALID_SKILL_FILE')
+  if (from + entry.compressed > bytes.length) return fail(code)
   const raw = bytes.subarray(from, from + entry.compressed)
   let data: Buffer
   try { data = entry.method === 0 ? Buffer.from(raw) : inflateRawSync(raw, { maxOutputLength: Math.max(entry.size, 1) }) }
-  catch { return fail('INVALID_SKILL_FILE') }
-  if (data.length !== entry.size || crc32(data) !== entry.crc) return fail('INVALID_SKILL_FILE')
+  catch { return fail(code) }
+  if (data.length !== entry.size || crc32(data) !== entry.crc) return fail(code)
   return data
 }
 // The archive must carry exactly one SKILL.md, at the root or directly inside the single top-level directory.

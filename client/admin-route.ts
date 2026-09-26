@@ -6,6 +6,7 @@ export const adminSections = [
   { id: 'releases', label: '发布包', icon: 'download' },
   { id: 'media', label: '图片库', icon: 'grid' },
   { id: 'knowledge', label: '知识库', icon: 'book' },
+  { id: 'experts', label: '专家分发', icon: 'person' },
   { id: 'analytics', label: '运营统计', icon: 'windows' },
 ] as const
 export const analyticsViews = [

@@ -8,7 +8,7 @@ const messages: Record<string, string> = {
   PACKAGE_CHECKSUM_MISMATCH: '文件校验失败：大小或 SHA-512 与打包描述文件不一致。此次上传未保存，请使用同一次打包的原始文件重试；旧草稿请先移除不匹配的文件。',
   CATALOG_LIMIT: '发布记录已达到容量上限，请联系维护人员整理。',
   INVALID_NAVIGATION: '请检查目录分组与章节，章节不能重复或遗漏。', INVALID_IMAGE: '请选择有效的 PNG、JPEG 或 WebP 图片，尺寸不超过 16000 像素且总像素不超过 4000 万。',
-  IMAGE_LIMIT: '图片库已达到 4000 张上限。', UPLOAD_TOO_LARGE: '文件超过限制：图片 10 MiB，技能文件 5 MiB，软件包 2 GiB。', UPLOAD_BUSY: '当前上传较多，请稍后重试。', EMPTY_UPLOAD: '不能上传空文件。',
+  IMAGE_LIMIT: '图片库已达到 4000 张上限。', UPLOAD_TOO_LARGE: '文件超过限制：图片 10 MiB，技能文件 5 MiB，专家包 110 MiB，软件包 2 GiB。', UPLOAD_BUSY: '当前上传较多，请稍后重试。', EMPTY_UPLOAD: '不能上传空文件。',
   INVALID_RELEASE: '请填写正确的版本、平台、标题和更新说明（1–30 条，每条最多 1000 字）。', INVALID_PACKAGE_NAME: '文件名必须包含当前版本和平台架构；Windows 需要 exe，macOS 需要 arm64.zip，可附带同版本安装包。',
   FILE_EXISTS: '已有同名文件，请先移除旧文件。', FILE_LIMIT: '一个平台最多上传 8 个文件。', DRAFT_LIMIT: '发布草稿已达到 100 个，请整理旧草稿。', DRAFT_NOT_FOUND: '发布草稿不存在，请刷新列表。',
   ALREADY_PUBLISHED: '该版本的平台安装包已发布，请使用新版本。', RELEASE_ID_LOCKED: '版本和平台由描述文件确定，不能手动修改，请新建发布草稿。', MAIN_PACKAGE_REQUIRED: '请上传一个主安装包：Windows 为 exe，macOS 为 arm64.zip。',
@@ -26,9 +26,15 @@ const messages: Record<string, string> = {
   KNOWLEDGE_NOT_FOUND: '知识库条目不存在或已被删除，请刷新列表。', KNOWLEDGE_ID_TAKEN: '该知识库标识已被占用，请换一个或留空由服务端生成。',
   TENANT_ID_TAKEN: '该租户 ID 已被其他知识库使用，请核对后修改。', KNOWLEDGE_LIMIT: '知识库条目已达到 500 个上限，请先整理旧条目。',
   INVALID_SKILL_FILE: '技能文件无效：只接受 .zip 或 .md，最多 5 MiB。ZIP 中须恰好有一个 SKILL.md，位于压缩包根目录或唯一的一级目录内，该目录名需与 frontmatter 的 name 一致；SKILL.md 需含小写连字符格式的 name 和非空 description。',
-  SKILL_NOT_FOUND: '该知识库尚未配置技能文件，请刷新后重试。',
+  SKILL_NOT_FOUND: '该知识库尚未配置技能文件，请刷新后重试。', EXPERT_SKILL_NOT_FOUND: '草稿里已没有这个技能，请刷新后重试。',
+  EXPERT_NOT_FOUND: '专家不存在或已被删除，请刷新列表。', EXPERT_ID_TAKEN: '该专家 ID 已被占用，请换一个。', EXPERT_LIMIT: '专家数量已达到 200 个上限，请先整理。',
+  INVALID_EXPERT: '专家内容不完整或格式不正确：', EXPERT_NOT_PUBLISHABLE: '还不能发布，请先完善：', NOTHING_TO_PUBLISH: '当前草稿与已发布版本一致，无需重复发布。',
+  EXPERT_NOT_PUBLISHED: '请先发布，再上架。', SKILL_LIMIT: '一位专家最多 20 个技能。',
+  INVALID_EXPERT_PACKAGE: '专家包无法导入：', EXPERT_PACKAGE_REJECTED: '专家包还有需要处理的问题：', IMPORT_NOT_FOUND: '导入已过期或已完成，请重新选择专家包。',
+  INVALID_EXPERT_TOOL: '工具配置不符合要求：', EXPERT_TOOL_NOT_FOUND: '工具库中已没有这个工具，请刷新列表。', EXPERT_TOOL_IN_USE: '仍有专家在使用这个工具，请先在这些专家中移除：',
 }
-export class ApiError extends Error { constructor(public code: string) { super(messages[code] ?? '操作未完成，请稍后重试。') } }
+export class ApiError extends Error { constructor(public code: string, public issues: string[] = []) { super(messages[code] ?? '操作未完成，请稍后重试。') } }
+const issuesOf = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 12) : []
 export async function guideApi<T>(url: string, options: { method?: string; data?: unknown; csrf?: string; signal?: AbortSignal; timeout?: number } = {}): Promise<T> {
   const controller = new AbortController()
   const abort = () => controller.abort()
@@ -40,7 +46,7 @@ export async function guideApi<T>(url: string, options: { method?: string; data?
       headers: { ...(options.data !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(options.csrf ? { 'X-CSRF-Token': options.csrf } : {}) },
       body: options.data === undefined ? undefined : JSON.stringify(options.data) })
     const value = await response.json()
-    if (!response.ok) throw new ApiError(value.error ?? 'CONTENT_UNAVAILABLE')
+    if (!response.ok) throw new ApiError(value.error ?? 'CONTENT_UNAVAILABLE', issuesOf(value.issues))
     return value
   } finally { clearTimeout(timeout); options.signal?.removeEventListener('abort', abort) }
 }
@@ -55,7 +61,7 @@ export function uploadFile<T>(url: string, file: File, options: { csrf: string; 
     xhr.setRequestHeader('Content-Type', 'application/octet-stream'); xhr.setRequestHeader('X-CSRF-Token', options.csrf)
     if (options.revision) xhr.setRequestHeader('X-Revision', options.revision)
     xhr.upload.onprogress = e => { if (e.lengthComputable) options.progress(Math.round(e.loaded / e.total * 100)) }
-    xhr.onload = () => { try { const data = JSON.parse(xhr.responseText); xhr.status >= 200 && xhr.status < 300 ? finish(undefined, data) : finish(new ApiError(data.error)) } catch { finish(new Error('Invalid response')) } }
+    xhr.onload = () => { try { const data = JSON.parse(xhr.responseText); xhr.status >= 200 && xhr.status < 300 ? finish(undefined, data) : finish(new ApiError(data.error, issuesOf(data.issues))) } catch { finish(new Error('Invalid response')) } }
     xhr.onerror = xhr.ontimeout = () => finish(new Error('Upload failed'))
     xhr.onabort = () => finish(new DOMException('Upload cancelled', 'AbortError'))
     options.signal.addEventListener('abort', abort, { once: true })
