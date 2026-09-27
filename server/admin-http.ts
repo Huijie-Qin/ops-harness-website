@@ -5,9 +5,12 @@ import type { ContentSync } from './content-sync.js'
 import { GuideError } from './guide-store.js'
 import type { KnowledgeStore } from './knowledge-store.js'
 import { parseReleaseManifest } from './release-manifest.js'
+import type { ExpertStore } from './expert-store.js'
+import { handleExpertAdmin } from './expert-http.js'
 
-export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync, knowledge?: KnowledgeStore): AdminHandler {
+export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync, knowledge?: KnowledgeStore, experts?: ExpertStore): AdminHandler {
   return async (req, res, url, { json, method, body }) => {
+    if (experts && await handleExpertAdmin(experts, req, res, url, { json, method, body })) return true
     if (url.pathname === '/api/admin/knowledge' || url.pathname.startsWith('/api/admin/knowledge/')) {
       if (!knowledge) throw new GuideError('CONTENT_UNAVAILABLE', 503)
       if (url.pathname === '/api/admin/knowledge') {

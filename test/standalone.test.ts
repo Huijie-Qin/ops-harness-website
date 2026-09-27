@@ -123,3 +123,23 @@ test('bundled tracking contract matches its provenance and contains no DSH impor
   assert.equal(contracts.CATALOG_VERSION, 3)
   assert.equal(contracts.featureFor('page.view', undefined, { pageKey: 'tool-market' }), 'tools')
 })
+
+test('bundled expert distribution contract matches its provenance and installed package', async () => {
+  const record = JSON.parse(await readFile(new URL('../vendor/expert-distribution-contract.json', import.meta.url), 'utf8'))
+  const bytes = await readFile(new URL(`../vendor/${record.artifact}`, import.meta.url))
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), record.sha256)
+  assert.ok(record.artifact.endsWith(`-${record.sha256.slice(0, 12)}.tgz`))
+  const installed = JSON.parse(await readFile(new URL('../node_modules/@dsh-ops/expert-distribution-contract/package.json', import.meta.url), 'utf8'))
+  assert.equal(installed.name, record.name)
+  assert.equal(installed.version, record.version)
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.dependencies[record.name], `file:vendor/${record.artifact}`)
+  const contract = await import('@dsh-ops/expert-distribution-contract')
+  assert.equal(contract.CONTRACT_VERSION, record.contractVersion)
+  // 0.1.1: scenarios, the built-in expert list and the features header; the scenario helpers load without zod.
+  assert.equal(contract.SCENARIO_LIMITS.perExpert, 8)
+  assert.deepEqual(contract.BUILTIN_EXPERTS.map(expert => expert.id), ['product-default', 'data-analyst', 'push-expert', 'marketing-compliance', 'browser-content-compliance'])
+  assert.equal(contract.EXPERT_FEATURES_HEADER, 'x-ops-expert-features')
+  const scenarios = await import('@dsh-ops/expert-distribution-contract/scenarios')
+  assert.equal(scenarios.scenarioIssues([{ id: 'a', title: '场景', prompt: '提问' }]).length, 0)
+})

@@ -9,6 +9,7 @@ import { GuideStore } from './guide-store.js'
 import { MediaStore } from './media-store.js'
 import { ReleaseAdmin } from './release-admin.js'
 import { KnowledgeStore } from './knowledge-store.js'
+import { ExpertStore } from './expert-store.js'
 import { createAdminHandler } from './admin-http.js'
 import { createGuideHandler } from './guide-http.js'
 import { TrackingStore } from './tracking/store.js'
@@ -25,9 +26,10 @@ const media = new MediaStore(config.contentDirectory, seedContent)
 const guides = new GuideStore(path.join(seedContent, 'guide'), config.contentDirectory)
 const sync = new ContentSync(guides, media, path.resolve('content'))
 const knowledge = new KnowledgeStore(config.contentDirectory)
+const experts = new ExpertStore(config.contentDirectory, knowledge)
 const analytics = new TrackingStore(config.analyticsDirectory)
 const tracking = createTrackingHandlers(analytics, { enabled: config.trackingEnabled, defaultEnvironment: dev ? 'development' : 'production' })
-const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge)
+const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge, experts)
 const maintenance = setInterval(() => void analytics.maintain().catch(() => {}), 3600000)
 maintenance.unref()
 await analytics.maintain()
@@ -41,6 +43,7 @@ server.on('request', createHandler(config, {
   clientRoot: path.resolve('dist/client'),
   guide,
   knowledge,
+  experts,
   ...(adminIconHash ? { adminIconHash } : {}),
   ...(vite ? { dev: vite.middlewares } : {}),
   onError: error => console.error('[website] request failed:', error instanceof Error ? error.name : 'UnknownError'),
