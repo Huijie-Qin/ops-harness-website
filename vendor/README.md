@@ -17,8 +17,10 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 
 ## 专家分发契约
 
-`dsh-ops-expert-distribution-contract-0.1.0-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/expert-distribution-contract`
-的 pnpm pack：专家包、云端目录、可见性规则与自定义工具可移植定义，官网与工作助手共用同一份结构和校验。来源提交、输入哈希与
+`dsh-ops-expert-distribution-contract-<版本>-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/expert-distribution-contract`
+的 pnpm pack：专家包、云端目录、可见性规则、自定义工具可移植定义与常用场景规则（0.1.1 起，含不依赖 zod 的 `/scenarios` 子入口），
+官网与工作助手共用同一份结构和校验。当前为 0.1.1（含常用场景与场景图标），输入与产品仓库提交 b00cca1（常用场景功能分支）的源码逐文件一致；
+0.1.0 制品已不再被引用并移除。来源提交、输入哈希与
 制品 SHA-256 见 [expert-distribution-contract.json](expert-distribution-contract.json)，`test/standalone.test.ts` 核对制品、
 安装包与契约版本。更新时在产品仓库完成契约 build/test 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、来源清单
 与锁文件，再执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。

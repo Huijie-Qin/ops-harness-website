@@ -136,4 +136,10 @@ test('bundled expert distribution contract matches its provenance and installed 
   assert.equal(manifest.dependencies[record.name], `file:vendor/${record.artifact}`)
   const contract = await import('@dsh-ops/expert-distribution-contract')
   assert.equal(contract.CONTRACT_VERSION, record.contractVersion)
+  // 0.1.1: scenarios, the built-in expert list and the features header; the scenario helpers load without zod.
+  assert.equal(contract.SCENARIO_LIMITS.perExpert, 8)
+  assert.deepEqual(contract.BUILTIN_EXPERTS.map(expert => expert.id), ['product-default', 'data-analyst', 'push-expert', 'marketing-compliance', 'browser-content-compliance'])
+  assert.equal(contract.EXPERT_FEATURES_HEADER, 'x-ops-expert-features')
+  const scenarios = await import('@dsh-ops/expert-distribution-contract/scenarios')
+  assert.equal(scenarios.scenarioIssues([{ id: 'a', title: '场景', prompt: '提问' }]).length, 0)
 })

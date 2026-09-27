@@ -2,7 +2,7 @@ import { crc32, deflateRawSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
 import { test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createServer } from 'node:http'
@@ -15,6 +15,7 @@ import { ExpertStore } from '../server/expert-store.js'
 import { createAdminHandler } from '../server/admin-http.js'
 import { createGuideHandler } from '../server/guide-http.js'
 import { createHandler } from '../server/app.js'
+import { BUILTIN_EXPERTS, BuiltinScenarioOverrideSchema, parseCloudExpertCatalog } from '@dsh-ops/expert-distribution-contract'
 
 // Deflate-only ZIP writer: local headers + central directory + EOCD, no data descriptors.
 function archive(files: { name: string; data?: Buffer }[]) {
@@ -116,8 +117,8 @@ async function fixture(t: TestContext) {
   return { root, origin, content, headers, json, upload, list, catalog, experts }
 }
 
-async function createPublished(f: Awaited<ReturnType<typeof fixture>>, visibility: unknown = { mode: 'allowlist', employeeIds: ['s00526367'] }) {
-  const created = await f.json('/api/admin/experts', { id: 'push-ops', draft: draft(), revision: (await f.list()).revision })
+async function createPublished(f: Awaited<ReturnType<typeof fixture>>, visibility: unknown = { mode: 'allowlist', employeeIds: ['s00526367'] }, extra: Record<string, unknown> = {}) {
+  const created = await f.json('/api/admin/experts', { id: 'push-ops', draft: draft(extra), revision: (await f.list()).revision })
   assert.equal(created.status, 200)
   let { revision } = await created.json()
   const skill = await f.upload('/api/admin/experts/push-ops/skills?name=push-copywriting.zip', skillZip('push-copywriting'), { 'X-Revision': revision })
@@ -172,7 +173,7 @@ test('the catalog and downloads only reach visible employees', async t => {
   assert.equal(anonymous.identity.recognized, false)
   const listed = await f.catalog('S00526367')
   assert.equal(listed.status, 200)
-  assert.equal(listed.headers.get('vary'), 'X-Ops-Employee-Id')
+  assert.equal(listed.headers.get('vary'), 'X-Ops-Employee-Id, X-Ops-Expert-Features')
   const entry = (await listed.json()).experts[0]
   assert.equal(entry.id, 'push-ops')
   assert.equal(entry.presetId, 'cloud-push-ops')
@@ -369,4 +370,333 @@ test('admin routes require the session and CSRF', async t => {
   assert.equal(noCsrf.status, 403)
   const crossSite = await fetch(f.origin + '/api/admin/experts', { method: 'POST', headers: { ...f.headers, Origin: 'http://evil.example', 'Content-Type': 'application/json' }, body: '{}' })
   assert.equal(crossSite.status, 403)
+})
+
+
+// ---- 常用场景 -------------------------------------------------------------------------------------
+
+const FEATURES = { 'X-Ops-Expert-Features': 'scenarios' }
+const scenarios = [
+  { id: 'weekend-push', title: ' 周末促活推送 ', summary: '按人群拆分文案', prompt: '帮我策划一次【活动主题】的周末促活推送。\r\n目标人群：【人群】' },
+  { id: 'push-review', title: '推送复盘', prompt: '复盘【活动名称】的推送效果', modeId: 'ppt' },
+]
+const canonical = [
+  { id: 'weekend-push', title: '周末促活推送', summary: '按人群拆分文案', prompt: '帮我策划一次【活动主题】的周末促活推送。\n目标人群：【人群】' },
+  { id: 'push-review', title: '推送复盘', prompt: '复盘【活动名称】的推送效果', modeId: 'ppt' },
+]
+
+test('scenarios are checked on save, published with the expert and served only to clients that read them', async t => {
+  const f = await fixture(t)
+  const revision = (await f.list()).revision
+  const rejected = async (list: unknown[]) => {
+    const response = await f.json('/api/admin/experts', { id: 'push-ops', draft: draft({ scenarios: list }), revision })
+    assert.equal(response.status, 400)
+    const body = await response.json() as { error: string; issues: string[] }
+    assert.equal(body.error, 'INVALID_EXPERT')
+    return body.issues.join('\n')
+  }
+  const one = (extra: Record<string, unknown>) => [{ id: 'a', title: '场景', prompt: '提问', ...extra }]
+  assert.match(await rejected(one({ title: '一二三四五六七八九十一二三四五六七' })), /常用场景第 1 个：场景名称不超过 16 个字/)
+  assert.match(await rejected(one({ prompt: '问'.repeat(301) })), /提问模板不超过 300 个字/)
+  assert.match(await rejected(one({ prompt: '【一】【二】【三】【四】' })), /【】最多 3 处/)
+  assert.match(await rejected(one({ modeId: 'spreadsheet' })), /工作模式无效/)
+  assert.match(await rejected(one({ automationTemplateId: 'daily-report' })), /未知字段 automationTemplateId/)
+  assert.match(await rejected(one({ prompt: '调用接口时带上 Bearer abcdefghijklmnopqrstuvwxyz' })), /密钥、令牌或密码/)
+  assert.match(await rejected(one({ id: 'Not Kebab' })), /场景 ID 无效/)
+  assert.match(await rejected([...one({}), { id: 'a', title: '另一个', prompt: '提问' }]), /常用场景第 2 个：场景 ID 重复/)
+  assert.match(await rejected([...one({}), { id: 'b', title: '场景', prompt: '提问' }]), /场景名称「场景」重复/)
+  assert.match(await rejected(Array.from({ length: 9 }, (_, index) => ({ id: `s-${index}`, title: `场景 ${index}`, prompt: '提问' }))), /最多 8 个常用场景/)
+
+  await createPublished(f, { mode: 'everyone' }, { scenarios })
+  const stored = (await (await fetch(f.origin + '/api/admin/experts/push-ops', { headers: f.headers })).json()).expert
+  assert.deepEqual(stored.draft.scenarios, canonical)
+  assert.equal(stored.draftChanged, false)
+  const snapshot = JSON.parse(await readFile(path.join(f.content, 'experts', 'versions', 'push-ops', '1.json'), 'utf8'))
+  assert.deepEqual(snapshot.content.scenarios, canonical)
+
+  // A client built before scenarios: no scenarios key, the scenario names as prompt suggestions, no overrides key.
+  const legacy = await f.catalog()
+  assert.equal(legacy.headers.get('vary'), 'X-Ops-Employee-Id, X-Ops-Expert-Features')
+  const legacyBody = await legacy.json()
+  assert.equal('scenarios' in legacyBody.experts[0], false)
+  assert.deepEqual(legacyBody.experts[0].starterPrompts, ['周末促活推送', '推送复盘'])
+  assert.equal('builtinScenarios' in legacyBody, false)
+  // A client that reads scenarios.
+  const current = await f.catalog(undefined, FEATURES)
+  const currentBody = await current.json()
+  assert.deepEqual(currentBody.experts[0].scenarios, canonical)
+  assert.deepEqual(currentBody.experts[0].starterPrompts, ['周末促活推送', '推送复盘'])
+  assert.equal('builtinScenarios' in currentBody, false)
+  const parsed = parseCloudExpertCatalog(currentBody)
+  assert.deepEqual(parsed.rejected, [])
+  assert.deepEqual(parsed.catalog.experts[0]!.scenarios, canonical)
+  // Each feature set has its own tag; a tag never revalidates the other set.
+  const legacyTag = legacy.headers.get('etag')!, currentTag = current.headers.get('etag')!
+  assert.notEqual(legacyTag, currentTag)
+  assert.equal((await f.catalog(undefined, { 'If-None-Match': legacyTag })).status, 304)
+  assert.equal((await f.catalog(undefined, { ...FEATURES, 'If-None-Match': currentTag })).status, 304)
+  assert.equal((await f.catalog(undefined, { ...FEATURES, 'If-None-Match': legacyTag })).status, 200)
+  assert.equal((await f.catalog(undefined, { 'X-Ops-Expert-Features': 'unknown, SCENARIOS ', 'If-None-Match': currentTag })).status, 304)
+})
+
+test('an expert without scenarios keeps its digest and an old snapshot still serves', async t => {
+  const f = await fixture(t)
+  let revision = await createPublished(f)
+  // Saving an empty list stores no key: the published expert shows no unpublished changes.
+  const stored = (await (await fetch(f.origin + '/api/admin/experts/push-ops', { headers: f.headers })).json()).expert.draft
+  const saved = await f.json('/api/admin/experts/push-ops', { draft: { ...stored, scenarios: [] }, revision }, 'PUT')
+  assert.equal(saved.status, 200)
+  const body = await saved.json()
+  revision = body.revision
+  assert.equal('scenarios' in body.expert.draft, false)
+  assert.equal(body.expert.draftChanged, false)
+  const catalog = JSON.parse(await readFile(path.join(f.content, 'experts', 'catalog.json'), 'utf8'))
+  assert.equal('scenarios' in catalog.experts[0].draft, false)
+  const again = await f.json('/api/admin/experts/push-ops/publish', { revision })
+  assert.equal((await again.json()).error, 'NOTHING_TO_PUBLISH')
+  // The snapshot on disk carries no scenarios (as every snapshot written before them); a fresh store reads it.
+  const snapshot = JSON.parse(await readFile(path.join(f.content, 'experts', 'versions', 'push-ops', '1.json'), 'utf8'))
+  assert.equal('scenarios' in snapshot.content, false)
+  const fresh = new ExpertStore(f.content)
+  for (const features of [new Set<'scenarios'>(), new Set<'scenarios'>(['scenarios'])]) {
+    const served = await fresh.publicCatalog('s00526367', features)
+    assert.equal(served.body.experts.length, 1)
+    assert.deepEqual(served.body.experts[0]!.starterPrompts, ['帮我策划一次周末促活推送'])
+    assert.equal(JSON.stringify(served.body).includes('"scenarios"'), false)
+  }
+  for (const headers of [{}, FEATURES]) assert.equal((await f.catalog('s00526367', headers)).status, 200)
+})
+
+test('package scenarios import into the draft and a re-import reports what changed', async t => {
+  const f = await fixture(t)
+  const first = (await (await f.upload('/api/admin/experts/import', expertPackage({ definition: { scenarios: canonical } }))).json()).preview
+  assert.deepEqual(first.errors, [])
+  assert.deepEqual(first.expert.scenarios, ['周末促活推送', '推送复盘'])
+  const applied = await f.json(`/api/admin/experts/import/${first.importId}/apply`, { target: { mode: 'create', id: 'push-ops' }, publish: true, revision: (await f.list()).revision })
+  assert.equal(applied.status, 200)
+  const expert = (await applied.json()).expert
+  assert.deepEqual(expert.draft.scenarios, canonical)
+  assert.equal(expert.draftChanged, false)
+
+  const next = [{ ...canonical[1]!, prompt: '复盘【活动名称】的推送效果，列出三条改进建议' }, canonical[0]!, { id: 'push-copy', title: '推送文案', prompt: '为【活动】写三版推送文案' }]
+  const second = (await (await f.upload('/api/admin/experts/import', expertPackage({ definition: { scenarios: next } }))).json()).preview
+  assert.deepEqual(second.changes.scenarios, { added: ['推送文案'], removed: [], updated: ['推送复盘'], reordered: true })
+  const third = (await (await f.upload('/api/admin/experts/import', expertPackage())).json()).preview
+  assert.deepEqual(third.changes.scenarios, { added: [], removed: ['周末促活推送', '推送复盘'], updated: [], reordered: false })
+
+  // The package format is strict: a field this website does not know is refused, not dropped.
+  const refused = await f.upload('/api/admin/experts/import', expertPackage({ definition: { scenarios: [{ ...canonical[0]!, automationTemplateId: 'x' }] } }))
+  assert.equal(refused.status, 400)
+  const reason = await refused.json()
+  assert.equal(reason.error, 'INVALID_EXPERT_PACKAGE')
+  assert.match(reason.issues.join(), /常用场景第 1 个：场景包含未知字段 automationTemplateId/)
+})
+
+test('scenario names a package carries as prompt suggestions do not outlive the scenarios', async t => {
+  const f = await fixture(t)
+  const titles = ['周末促活推送', '推送复盘'], legacy = ['帮我策划一次周末促活推送']
+  const importAndApply = async (bytes: Buffer, target: { mode: 'create' | 'update'; id: string }) => {
+    const { preview } = await (await f.upload('/api/admin/experts/import', bytes)).json()
+    assert.deepEqual(preview.errors, [])
+    const applied = await f.json(`/api/admin/experts/import/${preview.importId}/apply`, { target, adoptAllowlist: true, publish: true, revision: (await f.list()).revision })
+    assert.equal(applied.status, 200)
+    return { preview, ...(await applied.json()) as { revision: string; expert: { draft: Record<string, unknown> & { starterPrompts: string[] } } } }
+  }
+  const dropScenarios = async (id: string, draftValue: Record<string, unknown>, revision: string) => {
+    const saved = await f.json(`/api/admin/experts/${id}`, { draft: { ...draftValue, scenarios: [] }, revision }, 'PUT')
+    assert.equal(saved.status, 200)
+    const published = await f.json(`/api/admin/experts/${id}/publish`, { revision: (await saved.json()).revision })
+    assert.equal(published.status, 200)
+  }
+  const served = async (id: string) => {
+    const body = await (await f.catalog('s00526367', FEATURES)).json() as { experts: Array<{ id: string; starterPrompts: string[] }> }
+    return body.experts.find(item => item.id === id)!.starterPrompts
+  }
+  // As the product exports an expert that has scenarios: the prompt suggestions are the scenario names.
+  const exported = (origin?: Record<string, unknown>) => expertPackage({ definition: { scenarios: canonical, starterPrompts: titles }, ...(origin ? { origin } : {}) })
+
+  // A new expert keeps no suggestions of its own; clients without scenarios still see the names while they exist.
+  const created = await importAndApply(exported({ expertId: 'product-default-custom-new' }), { mode: 'create', id: 'push-new' })
+  assert.deepEqual(created.expert.draft.starterPrompts, [])
+  assert.deepEqual(created.expert.draft.scenarios, canonical)
+  assert.deepEqual(await served('push-new'), titles)
+  assert.deepEqual((await (await f.catalog('s00526367')).json()).experts.find((item: { id: string }) => item.id === 'push-new').starterPrompts, titles)
+  await dropScenarios('push-new', created.expert.draft, created.revision)
+  assert.deepEqual(await served('push-new'), [])
+
+  // An expert with its own suggestions keeps them through an import that brings scenarios, and shows them again without.
+  await importAndApply(expertPackage(), { mode: 'create', id: 'push-ops' })
+  const again = await (await f.upload('/api/admin/experts/import', exported())).json()
+  assert.deepEqual(again.preview.target, { mode: 'update', id: 'push-ops' })
+  assert.equal(again.preview.changes.basics, false)
+  assert.deepEqual(again.preview.changes.scenarios.added, titles)
+  const updated = await importAndApply(exported(), { mode: 'update', id: 'push-ops' })
+  assert.deepEqual(updated.expert.draft.starterPrompts, legacy)
+  assert.deepEqual(await served('push-ops'), titles)
+  await dropScenarios('push-ops', updated.expert.draft, updated.revision)
+  assert.deepEqual(await served('push-ops'), legacy)
+
+  // Suggestions that are not the scenario names are the creator's own and are kept as they are.
+  const own = await importAndApply(expertPackage({ definition: { scenarios: canonical, starterPrompts: ['帮我写一段推送文案'] }, origin: { expertId: 'product-default-custom-own' } }), { mode: 'create', id: 'push-own' })
+  assert.deepEqual(own.expert.draft.starterPrompts, ['帮我写一段推送文案'])
+})
+
+test('built-in expert scenarios are drafted, published to everyone and withdrawn', async t => {
+  const f = await fixture(t)
+  const route = '/api/admin/expert-builtin-scenarios'
+  assert.equal((await fetch(f.origin + route)).status, 401)
+  const noCsrf = await fetch(f.origin + route + '/data-analyst', { method: 'PUT', headers: { Cookie: f.headers.Cookie, Origin: f.origin, 'Content-Type': 'application/json' }, body: '{}' })
+  assert.equal(noCsrf.status, 403)
+  const list = () => fetch(f.origin + route, { headers: f.headers }).then(r => r.json())
+  const initial = await list()
+  assert.deepEqual(initial.experts.map((item: { id: string; name: string }) => [item.id, item.name]), BUILTIN_EXPERTS.map(item => [item.id, item.name]))
+  assert.ok(initial.experts.every((item: { draft: unknown[]; published?: unknown; draftChanged: boolean }) => item.draft.length === 0 && !item.published && !item.draftChanged))
+
+  for (const id of ['push-ops', 'cloud-push-ops', 'Data-Analyst']) {
+    const unknown = await f.json(`${route}/${id}`, { scenarios: canonical, revision: initial.revision }, 'PUT')
+    assert.equal(unknown.status, 404, id)
+    assert.equal((await unknown.json()).error, 'BUILTIN_EXPERT_NOT_FOUND')
+  }
+  const bad = await f.json(`${route}/data-analyst`, { scenarios: [{ id: 'a', title: '', prompt: '提问' }], revision: initial.revision }, 'PUT')
+  assert.equal(bad.status, 400)
+  const badBody = await bad.json()
+  assert.equal(badBody.error, 'INVALID_SCENARIOS')
+  assert.match(badBody.issues.join(), /常用场景第 1 个：请填写场景名称/)
+
+  const before = await f.catalog(undefined, FEATURES)
+  const beforeTag = before.headers.get('etag')!
+  assert.equal('builtinScenarios' in await before.json(), false)
+  const legacyTag = (await f.catalog()).headers.get('etag')!
+
+  const saved = await f.json(`${route}/data-analyst`, { scenarios, revision: initial.revision }, 'PUT')
+  assert.equal(saved.status, 200)
+  const draftView = await saved.json()
+  assert.deepEqual(draftView.expert.draft, canonical)
+  assert.equal(draftView.expert.draftChanged, true)
+  assert.equal(draftView.expert.published, undefined)
+  const stale = await f.json(`${route}/data-analyst/publish`, { revision: initial.revision })
+  assert.equal(stale.status, 409)
+  assert.equal((await stale.json()).error, 'REVISION_CONFLICT')
+  // A draft reaches no one.
+  assert.equal((await f.catalog(undefined, { ...FEATURES, 'If-None-Match': beforeTag })).status, 304)
+
+  const published = await f.json(`${route}/data-analyst/publish`, { revision: draftView.revision })
+  assert.equal(published.status, 200)
+  const publishedView = await published.json()
+  assert.equal(publishedView.expert.published.version, 1)
+  assert.deepEqual(publishedView.expert.published.scenarios, canonical)
+  assert.equal(publishedView.expert.draftChanged, false)
+  const nothing = await f.json(`${route}/data-analyst/publish`, { revision: publishedView.revision })
+  assert.equal(nothing.status, 409)
+  assert.equal((await nothing.json()).error, 'NOTHING_TO_PUBLISH')
+
+  // Everyone reading scenarios receives the override (anonymous and identified alike); the old tag no longer matches.
+  for (const employee of [undefined, 's00526367']) {
+    const response = await f.catalog(employee, FEATURES)
+    const body = await response.json()
+    assert.equal(body.builtinScenarios.length, 1)
+    assert.deepEqual(body.builtinScenarios[0], { expertId: 'data-analyst', scenarios: canonical, publishedAt: publishedView.expert.published.publishedAt })
+    BuiltinScenarioOverrideSchema.parse(body.builtinScenarios[0])
+    const parsed = parseCloudExpertCatalog(body)
+    assert.deepEqual(parsed.rejected, [])
+    assert.deepEqual(parsed.catalog.builtinScenarios, body.builtinScenarios)
+  }
+  const afterPublish = await f.catalog(undefined, { ...FEATURES, 'If-None-Match': beforeTag })
+  assert.equal(afterPublish.status, 200)
+  // Clients that do not read scenarios never see the key, and their tag is untouched.
+  const legacy = await f.catalog(undefined, { 'If-None-Match': legacyTag })
+  assert.equal(legacy.status, 304)
+
+  // An empty override hides what the product shipped for that expert.
+  let revision = publishedView.revision as string
+  const emptied = await (await f.json(`${route}/push-expert`, { scenarios: [], revision }, 'PUT')).json()
+  assert.equal(emptied.expert.draftChanged, true)
+  revision = (await (await f.json(`${route}/push-expert/publish`, { revision: emptied.revision })).json()).revision
+  const both = await (await f.catalog(undefined, FEATURES)).json()
+  assert.deepEqual(both.builtinScenarios.map((item: { expertId: string; scenarios: unknown[] }) => [item.expertId, item.scenarios.length]), [['data-analyst', 2], ['push-expert', 0]])
+
+  // An unpublished edit keeps serving the published list.
+  const edited = await (await f.json(`${route}/data-analyst`, { scenarios: canonical.slice(0, 1), revision }, 'PUT')).json()
+  assert.equal(edited.expert.draftChanged, true)
+  revision = edited.revision
+  assert.equal((await (await f.catalog(undefined, FEATURES)).json()).builtinScenarios[0].scenarios.length, 2)
+
+  // Withdrawing goes back to what the product shipped; every replaced file is kept in .trash.
+  const withdrawn = await f.json(`${route}/data-analyst`, { revision }, 'DELETE')
+  assert.equal(withdrawn.status, 200)
+  const withdrawnView = await withdrawn.json()
+  assert.deepEqual(withdrawnView.expert, { id: 'data-analyst', name: '数据分析专家', draft: [], draftChanged: false })
+  const remaining = await (await f.catalog(undefined, FEATURES)).json()
+  assert.deepEqual(remaining.builtinScenarios.map((item: { expertId: string }) => item.expertId), ['push-expert'])
+  const trash = (await readdir(path.join(f.content, 'experts', '.trash'))).filter(name => name.startsWith('builtin-scenarios-'))
+  assert.ok(trash.length >= 4)
+  const listed = await list()
+  assert.equal(listed.revision, withdrawnView.revision)
+  assert.deepEqual(listed.experts.filter((item: { published?: unknown }) => item.published).map((item: { id: string }) => item.id), ['push-expert'])
+
+  // A damaged overrides file only affects clients that read scenarios.
+  await writeFile(path.join(f.content, 'experts', 'builtin-scenarios.json'), '{"schemaVersion":1}')
+  assert.equal((await f.catalog()).status, 200)
+  assert.equal((await f.catalog(undefined, FEATURES)).status, 503)
+})
+
+test('scenario icons are checked on every write and travel with the scenario to the catalog, imports and built-in overrides', async t => {
+  const f = await fixture(t)
+  const withIcons = [{ ...canonical[0]!, icon: 'megaphone' }, canonical[1]!]
+  const unknownIcon = [{ ...canonical[0]!, icon: 'rocket' }]
+
+  // An icon outside the contract's set is refused on save, naming the scenario the way the editor numbers it.
+  for (const icon of ['rocket', 42, '']) {
+    const refused = await f.json('/api/admin/experts', { id: 'push-ops', draft: draft({ scenarios: [{ ...canonical[0]!, icon }] }), revision: (await f.list()).revision })
+    assert.equal(refused.status, 400, String(icon))
+    const body = await refused.json() as { error: string; issues: string[] }
+    assert.equal(body.error, 'INVALID_EXPERT')
+    assert.match(body.issues.join('\n'), /常用场景第 1 个：场景图标无效/)
+  }
+
+  // A valid icon is stored, published and served to clients that read scenarios; others never receive scenarios.
+  await createPublished(f, { mode: 'everyone' }, { scenarios: withIcons })
+  const stored = (await (await fetch(f.origin + '/api/admin/experts/push-ops', { headers: f.headers })).json()).expert
+  assert.deepEqual(stored.draft.scenarios, withIcons)
+  const snapshot = JSON.parse(await readFile(path.join(f.content, 'experts', 'versions', 'push-ops', '1.json'), 'utf8'))
+  assert.deepEqual(snapshot.content.scenarios, withIcons)
+  const served = await (await f.catalog(undefined, FEATURES)).json()
+  assert.deepEqual(served.experts[0].scenarios, withIcons)
+  const parsed = parseCloudExpertCatalog(served)
+  assert.deepEqual(parsed.rejected, [])
+  assert.deepEqual(parsed.catalog.experts[0]!.scenarios, withIcons)
+  assert.equal('scenarios' in (await (await f.catalog()).json()).experts[0], false)
+
+  // A package's icon is checked like a saved one; a changed icon is an update of that scenario.
+  const badPackage = await f.upload('/api/admin/experts/import', expertPackage({ definition: { scenarios: unknownIcon } }))
+  assert.equal(badPackage.status, 400)
+  const badReason = await badPackage.json()
+  assert.equal(badReason.error, 'INVALID_EXPERT_PACKAGE')
+  assert.match(badReason.issues.join(), /常用场景第 1 个：场景图标无效/)
+  const origin = { expertId: 'product-default-custom-icons' }
+  const first = (await (await f.upload('/api/admin/experts/import', expertPackage({ definition: { scenarios: withIcons }, origin }))).json()).preview
+  assert.deepEqual(first.errors, [])
+  const applied = await f.json(`/api/admin/experts/import/${first.importId}/apply`, { target: { mode: 'create', id: 'push-icons' }, revision: (await f.list()).revision })
+  assert.equal(applied.status, 200)
+  assert.deepEqual((await applied.json()).expert.draft.scenarios, withIcons)
+  const recolored = (await (await f.upload('/api/admin/experts/import', expertPackage({ definition: { scenarios: [{ ...withIcons[0]!, icon: 'gift' }, withIcons[1]!] }, origin }))).json()).preview
+  assert.deepEqual(recolored.target, { mode: 'update', id: 'push-icons' })
+  assert.deepEqual(recolored.changes.scenarios, { added: [], removed: [], updated: ['周末促活推送'], reordered: false })
+
+  // Built-in overrides follow the same rule and reach everyone with the icon.
+  const route = '/api/admin/expert-builtin-scenarios'
+  const revision = (await (await fetch(f.origin + route, { headers: f.headers })).json()).revision as string
+  const badBuiltin = await f.json(`${route}/data-analyst`, { scenarios: unknownIcon, revision }, 'PUT')
+  assert.equal(badBuiltin.status, 400)
+  const badBuiltinBody = await badBuiltin.json()
+  assert.equal(badBuiltinBody.error, 'INVALID_SCENARIOS')
+  assert.match(badBuiltinBody.issues.join(), /常用场景第 1 个：场景图标无效/)
+  const saved = await f.json(`${route}/data-analyst`, { scenarios: withIcons, revision }, 'PUT')
+  assert.equal(saved.status, 200)
+  const published = await f.json(`${route}/data-analyst/publish`, { revision: (await saved.json()).revision })
+  assert.equal(published.status, 200)
+  const override = (await (await f.catalog(undefined, FEATURES)).json()).builtinScenarios[0]
+  assert.equal(override.expertId, 'data-analyst')
+  assert.deepEqual(override.scenarios, withIcons)
+  BuiltinScenarioOverrideSchema.parse(override)
 })
