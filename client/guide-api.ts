@@ -32,6 +32,7 @@ const messages: Record<string, string> = {
   EXPERT_NOT_PUBLISHED: '请先发布，再上架。', SKILL_LIMIT: '一位专家最多 20 个技能。',
   INVALID_EXPERT_PACKAGE: '专家包无法导入：', EXPERT_PACKAGE_REJECTED: '专家包还有需要处理的问题：', IMPORT_NOT_FOUND: '导入已过期或已完成，请重新选择专家包。',
   INVALID_EXPERT_TOOL: '工具配置不符合要求：', EXPERT_TOOL_NOT_FOUND: '工具库中已没有这个工具，请刷新列表。', EXPERT_TOOL_IN_USE: '仍有专家在使用这个工具，请先在这些专家中移除：',
+  INVALID_SCENARIOS: '常用场景不符合要求：', BUILTIN_EXPERT_NOT_FOUND: '这位内置专家不存在，请刷新列表。',
 }
 export class ApiError extends Error { constructor(public code: string, public issues: string[] = []) { super(messages[code] ?? '操作未完成，请稍后重试。') } }
 const issuesOf = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 12) : []

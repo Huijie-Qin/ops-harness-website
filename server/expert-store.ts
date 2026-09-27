@@ -5,16 +5,18 @@ import type { IncomingMessage } from 'node:http'
 import { z } from 'zod'
 import {
   AppearanceSchema, BUILTIN_CAPABILITIES, BUILTIN_TOOLS, BUILTIN_TOOL_IDS, BuiltinCapabilitySchema, CONTRACT_VERSION,
-  CATALOG_SCHEMA_VERSION, CUSTOM_TOOL_KEY_PATTERN, CustomToolDefinitionSchema, EXPERT_CATEGORY_IDS, EXPERT_ID_PATTERN, EXPERT_LIMITS,
+  CATALOG_SCHEMA_VERSION, CUSTOM_TOOL_KEY_PATTERN, CustomToolDefinitionSchema, EXPERT_CATEGORY_IDS, EXPERT_FEATURE_SCENARIOS, EXPERT_ID_PATTERN, EXPERT_LIMITS,
   ExpertPackageDefinitionSchema, ExpertPackageManifestSchema, KnowledgeRefSchema, OwnerSchema, PACKAGE_DEFINITION_FILE,
-  PACKAGE_MANIFEST_FILE, PACKAGE_RESPONSIBILITY_FILE, RESERVED_SKILL_NAMES, RESERVED_SKILL_PREFIX, SKILL_NAME_PATTERN, ToolRefSchema,
-  VisibilitySchema, customToolPortabilityIssues, hasControlCharacters, isExpertVisible, presetIdForCloudExpert, responsibilityIssue,
-  type CloudCustomTool, type CloudExpert, type CustomToolDefinition, type ExpertPackageDefinition, type ExpertVisibility,
-  type KnowledgeRef, type ToolRef,
+  PACKAGE_MANIFEST_FILE, PACKAGE_RESPONSIBILITY_FILE, RESERVED_SKILL_NAMES, RESERVED_SKILL_PREFIX, SKILL_NAME_PATTERN, ScenariosSchema, ToolRefSchema,
+  VisibilitySchema, customToolPortabilityIssues, deriveStarterPrompts, hasControlCharacters, isExpertVisible, presetIdForCloudExpert, responsibilityIssue,
+  scenarioIssues,
+  type CloudCustomTool, type CloudExpert, type CustomToolDefinition, type ExpertFeature, type ExpertPackageDefinition, type ExpertScenario,
+  type ExpertVisibility, type KnowledgeRef, type ToolRef,
 } from '@dsh-ops/expert-distribution-contract'
 import { GuideError, revisionOf } from './guide-store.js'
 import { atomicJson, missing, readJson, receiveFile, safeDirectory, withLock } from './admin-files.js'
 import { extractArchiveEntry, inspectSkillArchive, parseSkillFrontmatter, readArchive, type ArchiveEntry, type KnowledgeStore } from './knowledge-store.js'
+import { BuiltinScenarioStore, scenarioIssueText } from './builtin-scenario-store.js'
 import { maxSkillFileName } from '../shared/knowledge.js'
 
 /** Validation failure with the individual problems the admin page lists next to the form. */
@@ -23,6 +25,12 @@ export class ExpertValidationError extends GuideError {
 }
 const fail = (code: string, status = 400): never => { throw new GuideError(code, status) }
 const invalid = (issues: string[], code = 'INVALID_EXPERT'): never => { throw new ExpertValidationError(code, issues) }
+
+/**
+ * A scenario list in a draft or snapshot: the publishing rules apply on every save (the editor checks the same
+ * rules first), and an empty list is stored as an absent key so experts without scenarios keep their digests.
+ */
+const StoredScenariosSchema = ScenariosSchema.transform((value): ExpertScenario[] | undefined => value.length ? value : undefined).optional()
 
 const text = (max: number) => z.string().trim().max(max).refine(value => !hasControlCharacters(value), '包含控制字符')
 const DraftSkillSchema = z.object({
@@ -41,6 +49,8 @@ const DraftSchema = z.object({
   categoryIds: z.array(z.string().regex(EXPERT_ID_PATTERN)).max(EXPERT_LIMITS.categories),
   tags: z.array(text(EXPERT_LIMITS.tagLength).pipe(z.string().min(1))).max(EXPERT_LIMITS.tags),
   starterPrompts: z.array(text(EXPERT_LIMITS.starterPromptLength).pipe(z.string().min(1))).max(EXPERT_LIMITS.starterPrompts),
+  /** 常用场景. Optional so snapshots written before scenarios existed still parse; never stored empty. */
+  scenarios: StoredScenariosSchema,
   sortOrder: z.number().int().min(0).max(100_000),
   builtinTools: z.array(BuiltinCapabilitySchema).max(BUILTIN_CAPABILITIES.length),
   responsibility: z.string().max(EXPERT_LIMITS.responsibilityBytes),
@@ -131,7 +141,7 @@ export interface ImportPreview {
   importId: string
   expiresAt: string
   origin: { expertId: string; employeeId?: string; exportedAt: string; appVersion?: string }
-  expert: { name: string; summary: string; owner: { name: string; employeeId: string; contact?: string | undefined }; categoryIds: string[]; builtinTools: string[]; releaseNote?: string }
+  expert: { name: string; summary: string; owner: { name: string; employeeId: string; contact?: string | undefined }; categoryIds: string[]; builtinTools: string[]; releaseNote?: string; scenarios: string[] }
   skills: Array<{ name: string; size: number; required: boolean }>
   tools: Array<{ toolId?: string; customTool?: string; name: string; required: boolean; known: boolean }>
   customTools: ImportToolRow[]
@@ -139,7 +149,11 @@ export interface ImportPreview {
   suggestedAllowlist: string[]
   target: ImportTarget
   existing?: { id: string; name: string; published?: { version: number } }
-  changes?: { responsibility: boolean; skills: { added: string[]; removed: string[]; updated: string[] }; tools: { added: string[]; removed: string[] }; knowledge: { added: string[]; removed: string[] }; owner: boolean; basics: boolean }
+  changes?: {
+    responsibility: boolean; skills: { added: string[]; removed: string[]; updated: string[] }; tools: { added: string[]; removed: string[] }; knowledge: { added: string[]; removed: string[] }; owner: boolean; basics: boolean
+    /** 常用场景 by id, reported by name; `reordered` when only the order changed. */
+    scenarios: { added: string[]; removed: string[]; updated: string[]; reordered: boolean }
+  }
   warnings: string[]
   errors: string[]
 }
@@ -169,9 +183,15 @@ function toolWarnings(definition: CustomToolDefinition) {
   return customToolPortabilityIssues(definition).filter(issue => issue.severity === 'warning').map(issue => issue.message)
 }
 function toolName(ref: ToolRef) { return 'toolId' in ref ? BUILTIN_TOOLS.find(tool => tool.id === ref.toolId)?.name ?? ref.toolId : ref.customTool }
+function issueText(issue: z.core.$ZodIssue): string {
+  const [head, index] = issue.path
+  // Scenario problems name the scenario the way the editor numbers it.
+  if (head === 'scenarios') return scenarioIssueText({ ...(typeof index === 'number' ? { index } : {}), message: issue.message })
+  return `${issue.path.join('.') || '内容'}：${issue.message}`
+}
 function parse<T>(schema: z.ZodType<T>, input: unknown, code = 'INVALID_EXPERT'): T {
   const result = schema.safeParse(input)
-  if (!result.success) return invalid(result.error.issues.slice(0, 12).map(issue => `${issue.path.join('.') || '内容'}：${issue.message}`), code)
+  if (!result.success) return invalid(result.error.issues.slice(0, 12).map(issueText), code)
   return result.data
 }
 
@@ -182,12 +202,15 @@ export class ExpertStore {
   readonly imports: string
   private readonly snapshots = new Map<string, Snapshot>()
   private readonly toolLibrary: string
+  /** Scenario overrides of the experts the product ships (`builtin-scenarios.json`, same lock as the catalog). */
+  readonly builtinScenarios: BuiltinScenarioStore
   constructor(directory: string, private readonly knowledge?: KnowledgeStore, private readonly now: () => number = Date.now) {
     this.root = path.join(directory, 'experts')
     this.skills = path.join(this.root, 'skills')
     this.versions = path.join(this.root, 'versions')
     this.imports = path.join(this.root, 'imports')
     this.toolLibrary = 'tools.json'
+    this.builtinScenarios = new BuiltinScenarioStore(this.root, now)
   }
 
   // ---- Custom tool library -----------------------------------------------------------------------
@@ -544,6 +567,8 @@ export class ExpertStore {
     for (const skill of draft.skills) {
       if (RESERVED_SKILL_NAMES.has(skill.name) || skill.name.startsWith(RESERVED_SKILL_PREFIX)) issues.push(`技能名称 ${skill.name} 为系统保留`)
     }
+    // Saves already apply these rules; a draft stored under older rules is caught here before it reaches anyone.
+    for (const issue of scenarioIssues(draft.scenarios ?? [])) issues.push(scenarioIssueText(issue))
     await this.assertDraftSkills(draft, draft.skills)
     if (issues.length) invalid(issues, 'EXPERT_NOT_PUBLISHABLE')
   }
@@ -721,7 +746,10 @@ export class ExpertStore {
     const preview: ImportPreview = {
       importId, expiresAt,
       origin: { expertId: manifest.origin.expertId, ...(manifest.origin.employeeId ? { employeeId: manifest.origin.employeeId } : {}), exportedAt: manifest.exportedAt, ...(manifest.appVersion ? { appVersion: manifest.appVersion } : {}) },
-      expert: { name: definition.name, summary: definition.summary, owner: definition.owner, categoryIds: definition.categoryIds, builtinTools: definition.builtinTools, ...(definition.releaseNote ? { releaseNote: definition.releaseNote } : {}) },
+      expert: {
+        name: definition.name, summary: definition.summary, owner: definition.owner, categoryIds: definition.categoryIds, builtinTools: definition.builtinTools,
+        ...(definition.releaseNote ? { releaseNote: definition.releaseNote } : {}), scenarios: (definition.scenarios ?? []).map(scenario => scenario.title),
+      },
       skills: definition.skills.map(skill => ({ name: skill.name, size: skill.size, required: skill.required })),
       tools, customTools: resolved.rows, knowledge,
       suggestedAllowlist: definition.suggestedAllowlist ?? [],
@@ -730,7 +758,8 @@ export class ExpertStore {
     }
     if (existing) {
       preview.existing = { id: existing.id, name: existing.draft.name, ...(existing.published ? { published: { version: existing.published.version } } : {}) }
-      preview.changes = changesBetween(existing.draft, this.draftFrom(parsed, undefined, resolved.mapping))
+      // The same draft the update would store (it keeps the expert's own suggestions and sort order).
+      preview.changes = changesBetween(existing.draft, this.draftFrom(parsed, existing.draft, resolved.mapping))
     }
     return { ...preview, resolved }
   }
@@ -746,13 +775,20 @@ export class ExpertStore {
   }
   private draftFrom(parsed: ParsedPackage, previous?: ExpertDraft, mapping: ReadonlyMap<string, string> = new Map()): ExpertDraft {
     const { definition } = parsed
+    // The product exports the scenario names as prompt suggestions (for readers without scenarios). Stored, they
+    // would outlive the scenarios as uneditable legacy suggestions; the catalog derives them again while scenarios
+    // exist, so keep what the expert had instead (nothing for a new expert).
+    const derived = Boolean(definition.scenarios?.length)
+      && JSON.stringify(definition.starterPrompts) === JSON.stringify(deriveStarterPrompts(definition.scenarios ?? []))
     return {
       name: definition.name,
       summary: definition.summary,
       appearance: definition.appearance,
       categoryIds: definition.categoryIds,
       tags: definition.tags,
-      starterPrompts: definition.starterPrompts,
+      starterPrompts: derived ? [...(previous?.starterPrompts ?? [])] : definition.starterPrompts,
+      // The package definition is already canonical (strict contract schema); an empty list stays absent.
+      ...(definition.scenarios?.length ? { scenarios: definition.scenarios } : {}),
       sortOrder: definition.sortOrder ?? previous?.sortOrder ?? 1000,
       builtinTools: definition.builtinTools,
       responsibility: parsed.responsibility,
@@ -864,9 +900,14 @@ export class ExpertStore {
   /**
    * The catalog one employee sees, with the library entries those experts reference (current revision: a library
    * save reaches every user at the next sync). The ETag covers exactly the served entries.
+   *
+   * `features` are the optional fields the client asked for (`X-Ops-Expert-Features`). Scenarios and the
+   * built-in overrides are served only to clients that read them: a client built before them rejects unknown
+   * keys. Without the feature an expert's scenario names still arrive as its prompt suggestions.
    */
-  async publicCatalog(employeeId: string | undefined) {
-    const [document, library] = await Promise.all([this.load(), this.loadTools()])
+  async publicCatalog(employeeId: string | undefined, features: ReadonlySet<ExpertFeature> = new Set()) {
+    const withScenarios = features.has(EXPERT_FEATURE_SCENARIOS)
+    const [document, library, builtin] = await Promise.all([this.load(), this.loadTools(), withScenarios ? this.builtinScenarios.published() : []])
     const tools = new Map(library.tools.map(tool => [tool.definition.key, tool]))
     const experts: CloudExpert[] = []
     const referenced = new Set<string>()
@@ -880,16 +921,22 @@ export class ExpertStore {
       // An expert whose tool left the library is not served (the product would drop it anyway).
       if (keys.some(key => !tools.has(key))) continue
       for (const key of keys) referenced.add(key)
-      experts.push(entryOf(record, snapshot, owner))
+      experts.push(entryOf(record, snapshot, owner, withScenarios))
     }
     experts.sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id))
     const customTools: CloudCustomTool[] = [...referenced].sort().map((key) => {
       const tool = tools.get(key)!
       return { ...tool.definition, revision: tool.revision, updatedAt: tool.updatedAt }
     })
-    const body = { schemaVersion: CATALOG_SCHEMA_VERSION, contractVersion: CONTRACT_VERSION, identity: { recognized: employeeId !== undefined }, experts, customTools }
-    // Keyed by the employee too: a cached tag from another identity never revalidates this one.
-    return { etag: `"${digestOf({ employeeId: employeeId ?? null, body })}"`, body: { ...body, generatedAt: new Date(this.now()).toISOString() } }
+    const body = {
+      schemaVersion: CATALOG_SCHEMA_VERSION, contractVersion: CONTRACT_VERSION, identity: { recognized: employeeId !== undefined }, experts, customTools,
+      // Overrides reach everyone who reads them (anonymous too); absent when no shipped expert is overridden.
+      ...(builtin.length ? { builtinScenarios: builtin } : {}),
+    }
+    // Keyed by the employee and the feature set too: a cached tag from another identity or another client build
+    // never revalidates this one. A client without features keeps the tag it had before features existed.
+    const keyed = { employeeId: employeeId ?? null, body, ...(features.size ? { features: [...features].sort() } : {}) }
+    return { etag: `"${digestOf(keyed)}"`, body: { ...body, generatedAt: new Date(this.now()).toISOString() } }
   }
   private async visibleSnapshot(id: string, version: number, employeeId: string | undefined) {
     if (!EXPERT_ID_PATTERN.test(id) || !Number.isSafeInteger(version) || version < 1) return fail('NOT_FOUND', 404)
@@ -918,8 +965,13 @@ export class ExpertStore {
   }
 }
 
-function entryOf(record: ExpertRecord, snapshot: Snapshot, owner: NonNullable<ExpertDraft['owner']>): CloudExpert {
+/**
+ * One public catalog entry. When the expert has scenarios, its prompt suggestions are the scenario names (for clients
+ * that do not read scenarios, and so both lists agree); the scenarios themselves only go to clients that asked.
+ */
+function entryOf(record: ExpertRecord, snapshot: Snapshot, owner: NonNullable<ExpertDraft['owner']>, withScenarios: boolean): CloudExpert {
   const content = snapshot.content
+  const scenarios = content.scenarios ?? []
   return {
     id: record.id,
     presetId: presetIdForCloudExpert(record.id),
@@ -930,7 +982,9 @@ function entryOf(record: ExpertRecord, snapshot: Snapshot, owner: NonNullable<Ex
     appearance: content.appearance,
     categoryIds: content.categoryIds,
     tags: content.tags,
-    starterPrompts: content.starterPrompts,
+    starterPrompts: scenarios.length ? deriveStarterPrompts(scenarios) : content.starterPrompts,
+    // Absent from the JSON unless the client reads scenarios and there are some.
+    scenarios: withScenarios && scenarios.length ? scenarios : undefined,
     sortOrder: content.sortOrder,
     owner,
     allowClone: record.distribution.allowClone,
@@ -959,5 +1013,19 @@ function changesBetween(before: ExpertDraft, after: ExpertDraft): NonNullable<Im
     owner: JSON.stringify(before.owner ?? null) !== JSON.stringify(after.owner ?? null),
     basics: JSON.stringify([before.name, before.summary, before.appearance, before.categoryIds, before.tags, before.starterPrompts, before.builtinTools])
       !== JSON.stringify([after.name, after.summary, after.appearance, after.categoryIds, after.tags, after.starterPrompts, after.builtinTools]),
+    scenarios: scenarioChanges(before.scenarios ?? [], after.scenarios ?? []),
+  }
+}
+
+/** Scenario differences by id (a renamed scenario is an update), reported by name. */
+export function scenarioChanges(before: readonly ExpertScenario[], after: readonly ExpertScenario[]) {
+  const previous = new Map(before.map(scenario => [scenario.id, scenario]))
+  const next = new Map(after.map(scenario => [scenario.id, scenario]))
+  const kept = (list: readonly ExpertScenario[], other: ReadonlyMap<string, ExpertScenario>) => list.filter(scenario => other.has(scenario.id)).map(scenario => scenario.id)
+  return {
+    added: after.filter(scenario => !previous.has(scenario.id)).map(scenario => scenario.title),
+    removed: before.filter(scenario => !next.has(scenario.id)).map(scenario => scenario.title),
+    updated: after.filter(scenario => previous.has(scenario.id) && JSON.stringify(previous.get(scenario.id)) !== JSON.stringify(scenario)).map(scenario => scenario.title),
+    reordered: JSON.stringify(kept(before, next)) !== JSON.stringify(kept(after, previous)),
   }
 }

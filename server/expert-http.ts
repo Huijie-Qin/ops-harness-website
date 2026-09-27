@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { EMPLOYEE_ID_HEADER, normalizeEmployeeId } from '@dsh-ops/expert-distribution-contract'
+import { EMPLOYEE_ID_HEADER, EXPERT_FEATURES_HEADER, normalizeEmployeeId, parseExpertFeatures } from '@dsh-ops/expert-distribution-contract'
 import type { AdminContext } from './admin-files.js'
+import { BuiltinScenarioError } from './builtin-scenario-store.js'
 import { ExpertStore, ExpertValidationError } from './expert-store.js'
 import { serveFile } from './files.js'
 import { GuideError } from './guide-store.js'
@@ -11,8 +12,23 @@ import { GuideError } from './guide-store.js'
  */
 export async function handleExpertAdmin(store: ExpertStore, req: IncomingMessage, res: ServerResponse, url: URL, { json, method, body }: AdminContext): Promise<boolean> {
   const tools = url.pathname === '/api/admin/expert-tools' || url.pathname.startsWith('/api/admin/expert-tools/')
-  if (!tools && url.pathname !== '/api/admin/experts' && !url.pathname.startsWith('/api/admin/experts/')) return false
+  // Own prefix: under /api/admin/experts/ the id pattern would read it as a cloud expert id.
+  const builtin = url.pathname === '/api/admin/expert-builtin-scenarios' || url.pathname.startsWith('/api/admin/expert-builtin-scenarios/')
+  if (!tools && !builtin && url.pathname !== '/api/admin/experts' && !url.pathname.startsWith('/api/admin/experts/')) return false
   try {
+    if (builtin) {
+      // 内置专家场景: overrides of the shipped experts' scenarios; publishing reaches everyone at the next sync.
+      const scenarios = store.builtinScenarios
+      if (url.pathname === '/api/admin/expert-builtin-scenarios') { method(req, ['GET']); json(res, await scenarios.list()); return true }
+      const match = /^\/api\/admin\/expert-builtin-scenarios\/([a-z0-9][a-z0-9-]{0,40})(\/publish)?$/.exec(url.pathname)
+      if (!match) throw new GuideError('BUILTIN_EXPERT_NOT_FOUND', 404)
+      const expertId = match[1]!
+      if (match[2]) { method(req, ['POST']); json(res, await scenarios.publish(expertId, (await body(req)).revision)); return true }
+      method(req, ['PUT', 'DELETE'])
+      const data = await body(req)
+      json(res, req.method === 'PUT' ? await scenarios.saveDraft(expertId, data.scenarios, data.revision) : await scenarios.withdraw(expertId, data.revision))
+      return true
+    }
     if (tools) {
       // The custom tool library: saved entries take effect for every expert using them at the next sync.
       if (url.pathname === '/api/admin/expert-tools') { method(req, ['GET']); json(res, await store.listTools()); return true }
@@ -61,7 +77,7 @@ export async function handleExpertAdmin(store: ExpertStore, req: IncomingMessage
     } else throw new GuideError('NOT_FOUND', 404)
     return true
   } catch (error) {
-    if (!(error instanceof ExpertValidationError)) throw error
+    if (!(error instanceof ExpertValidationError) && !(error instanceof BuiltinScenarioError)) throw error
     json(res, { error: error.code, issues: error.issues }, error.status)
     return true
   }
@@ -81,6 +97,9 @@ class RequestBudget {
   }
 }
 
+/** The catalog differs by caller identity and by the optional fields the client reads. */
+const VARY = 'X-Ops-Employee-Id, X-Ops-Expert-Features'
+
 /**
  * Public, read-only routes the product's cloud expert plugin calls from its Host. Every route checks
  * the caller's visibility; anything not visible reads as absent. Browser pages are refused.
@@ -89,7 +108,7 @@ export function createExpertPublicHandler(store: ExpertStore, options: { now?: (
   const budget = new RequestBudget(options.requestsPerMinute ?? 600, 60_000, options.now ?? Date.now)
   const send = (req: IncomingMessage, res: ServerResponse, status: number, data: unknown) => {
     const body = JSON.stringify(data)
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', Vary: 'X-Ops-Employee-Id' })
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', Vary: VARY })
     res.end(req.method === 'HEAD' ? undefined : body)
   }
   return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
@@ -101,9 +120,11 @@ export function createExpertPublicHandler(store: ExpertStore, options: { now?: (
       const raw = Array.isArray(header) ? header[0] : header
       const employeeId = raw === undefined || raw.trim() === '' ? undefined : normalizeEmployeeId(raw)
       if (raw !== undefined && raw.trim() !== '' && employeeId === undefined) throw new GuideError('INVALID_EMPLOYEE_ID', 400)
-      res.setHeader('Vary', 'X-Ops-Employee-Id')
+      res.setHeader('Vary', VARY)
       if (url.pathname === '/api/experts/v1/catalog') {
-        const catalog = await store.publicCatalog(employeeId)
+        const requested = req.headers[EXPERT_FEATURES_HEADER]
+        const features = parseExpertFeatures(Array.isArray(requested) ? requested.join(',') : requested)
+        const catalog = await store.publicCatalog(employeeId, features)
         res.setHeader('ETag', catalog.etag)
         if (req.headers['if-none-match'] === catalog.etag) { res.writeHead(304, { 'Cache-Control': 'no-store' }); res.end(); return true }
         send(req, res, 200, catalog.body)

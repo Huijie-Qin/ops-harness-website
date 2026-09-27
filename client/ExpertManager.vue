@@ -4,9 +4,12 @@ import {
   BUILTIN_CAPABILITIES, BUILTIN_CAPABILITY_LABELS, EXPERT_CATEGORIES, EXPERT_ICONS, EXPERT_ID_PATTERN, EXPERT_LIMITS,
   ONEBOX_SPACE_ID_PATTERN, SHARED_LIBRARY_ID_PATTERN, KNOWLEDGE_REF_PATTERN, normalizeEmployeeId,
 } from '@dsh-ops/expert-distribution-contract'
+import { scenarioIssues, type ExpertScenario } from '@dsh-ops/expert-distribution-contract/scenarios'
 import { ApiError, guideApi, requestMessage, uploadFile } from './guide-api'
 import WebsiteDialog from './WebsiteDialog.vue'
 import ExpertToolLibrary from './ExpertToolLibrary.vue'
+import ExpertBuiltinScenarios from './ExpertBuiltinScenarios.vue'
+import ScenarioListEditor from './ScenarioListEditor.vue'
 
 type Owner = { name: string; employeeId: string; contact?: string }
 type SkillRow = { name: string; sha256: string; size: number; kind: 'zip' | 'md'; required: boolean; fileName?: string }
@@ -16,7 +19,7 @@ type KnowledgeRef = { kind: 'metric'; knowledgeId: string; name?: string; requir
 type Visibility = { mode: 'everyone' } | { mode: 'allowlist'; employeeIds: string[] }
 type Draft = {
   name: string; summary: string; appearance: { icon: string; accent: string; background: string }; categoryIds: string[]; tags: string[]
-  starterPrompts: string[]; sortOrder: number; builtinTools: string[]; responsibility: string; skills: SkillRow[]; tools: ToolRef[]
+  starterPrompts: string[]; scenarios?: ExpertScenario[]; sortOrder: number; builtinTools: string[]; responsibility: string; skills: SkillRow[]; tools: ToolRef[]
   knowledge: KnowledgeRef[]; owner?: Owner
 }
 type Expert = {
@@ -34,20 +37,23 @@ type ImportToolRow = {
 }
 type Preview = {
   importId: string; expiresAt: string; origin: { expertId: string; employeeId?: string; exportedAt: string; appVersion?: string }
-  expert: { name: string; summary: string; owner: Owner; categoryIds: string[]; builtinTools: string[]; releaseNote?: string }
+  expert: { name: string; summary: string; owner: Owner; categoryIds: string[]; builtinTools: string[]; releaseNote?: string; scenarios: string[] }
   skills: Array<{ name: string; size: number; required: boolean }>
   tools: Array<{ toolId?: string; customTool?: string; name: string; required: boolean; known: boolean }>
   customTools: ImportToolRow[]
   knowledge: Array<KnowledgeRef & { status: 'ok' | 'missing' | 'disabled' | 'unsynced'; label: string }>
   suggestedAllowlist: string[]; target: { mode: 'create' | 'update'; id: string }
   existing?: { id: string; name: string; published?: { version: number } }
-  changes?: { responsibility: boolean; skills: { added: string[]; removed: string[]; updated: string[] }; tools: { added: string[]; removed: string[] }; knowledge: { added: string[]; removed: string[] }; owner: boolean; basics: boolean }
+  changes?: {
+    responsibility: boolean; skills: { added: string[]; removed: string[]; updated: string[] }; tools: { added: string[]; removed: string[] }; knowledge: { added: string[]; removed: string[] }; owner: boolean; basics: boolean
+    scenarios: { added: string[]; removed: string[]; updated: string[]; reordered: boolean }
+  }
   warnings: string[]; errors: string[]
 }
 type OneboxRow = { ref: string; name: string; description: string; spaceId: string; sharedLibraryId: string; required: boolean }
 type Form = {
   name: string; summary: string; icon: string; accent: string; background: string; categoryIds: string[]; tags: string; starterPrompts: string
-  sortOrder: number; builtinTools: string[]; responsibility: string; skills: SkillRow[]
+  scenarios: ExpertScenario[]; sortOrder: number; builtinTools: string[]; responsibility: string; skills: SkillRow[]
   tools: Record<string, { selected: boolean; required: boolean }>; customTools: Record<string, { selected: boolean; required: boolean }>; metrics: Record<string, { selected: boolean; required: boolean }>
   onebox: OneboxRow[]; ownerName: string; ownerEmployeeId: string; ownerContact: string
 }
@@ -57,8 +63,12 @@ const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ error: [e: unknown]; dirty: [v: boolean]; busy: [v: boolean] }>()
 const iconLabels: Record<string, string> = { sparkles: '星光', document: '文档', megaphone: '喇叭', design: '设计', analytics: '分析', briefcase: '公文包', research: '研究', code: '代码', shield: '盾牌' }
 const items = ref<Summary[]>([]), revision = ref(''), current = ref<Expert>(), options = ref<Options>({ tools: [], metrics: [], customTools: [] })
-/** 专家 / 自定义工具 sub-pages; the tool library reports its own unsaved edits and busy state. */
-const tab = ref<'experts' | 'tools'>('experts'), toolDirty = ref(false), toolBusy = ref(false)
+/** 专家 / 自定义工具 / 内置专家场景 sub-pages; the child pages report their own unsaved edits and busy state. */
+type Tab = 'experts' | 'tools' | 'builtin'
+const TABS: readonly Tab[] = ['experts', 'tools', 'builtin']
+const tab = ref<Tab>('experts'), toolDirty = ref(false), toolBusy = ref(false), builtinDirty = ref(false), builtinBusy = ref(false)
+/** A scenario form is open in the editor: its edit is not in the form yet. */
+const scenarioEditing = ref(false)
 const form = ref<Form>(), baseline = ref(''), distribution = ref<DistributionForm>(), distributionBaseline = ref('')
 const busy = ref(false), loading = ref(true), notice = ref(''), error = ref(''), issues = ref<string[]>([])
 const progress = ref(0), uploadName = ref(''), skillRequired = ref(true)
@@ -70,8 +80,11 @@ const lifetime = new AbortController()
 let upload: AbortController | undefined
 
 const dirty = computed(() => form.value !== undefined && JSON.stringify(form.value) !== baseline.value)
+/** Edits not in the stored draft yet: the form, or a scenario row still open in the editor. */
+const unsaved = computed(() => dirty.value || scenarioEditing.value)
 const distributionDirty = computed(() => distribution.value !== undefined && JSON.stringify(distribution.value) !== distributionBaseline.value)
-watch([dirty, distributionDirty, toolDirty], ([a, b, c]) => emit('dirty', a || b || c)); watch([busy, toolBusy], ([a, b]) => emit('busy', a || b))
+const childBusy = computed(() => toolBusy.value || builtinBusy.value)
+watch([dirty, distributionDirty, scenarioEditing, toolDirty, builtinDirty], values => emit('dirty', values.some(Boolean))); watch([busy, childBusy], ([a, b]) => emit('busy', a || b))
 /** Conflicts the admin still has to resolve before the import can be applied. */
 const unresolvedTools = computed(() => (importing.value?.preview?.customTools ?? []).filter(row => row.resolution === 'conflict' && !importing.value?.toolChoices[row.key]))
 const call = <T,>(url: string, init: { method?: string; data?: unknown; timeout?: number } = {}) => guideApi<T>(url, { ...init, csrf: props.csrf, signal: lifetime.signal })
@@ -116,7 +129,8 @@ function formOf(draft: Draft): Form {
   for (const ref of draft.knowledge) if (ref.kind === 'metric' && !metrics[ref.knowledgeId]) metrics[ref.knowledgeId] = { selected: true, required: ref.required }
   return {
     name: draft.name, summary: draft.summary, icon: draft.appearance.icon, accent: draft.appearance.accent, background: draft.appearance.background,
-    categoryIds: [...draft.categoryIds], tags: draft.tags.join('\n'), starterPrompts: draft.starterPrompts.join('\n'), sortOrder: draft.sortOrder,
+    categoryIds: [...draft.categoryIds], tags: draft.tags.join('\n'), starterPrompts: draft.starterPrompts.join('\n'),
+    scenarios: (draft.scenarios ?? []).map(scenario => ({ ...scenario })), sortOrder: draft.sortOrder,
     builtinTools: [...draft.builtinTools], responsibility: draft.responsibility, skills: draft.skills.map(skill => ({ ...skill })), tools, customTools, metrics,
     onebox: draft.knowledge.flatMap(ref => ref.kind === 'onebox' ? [{ ref: ref.ref, name: ref.name, description: ref.description ?? '', spaceId: ref.spaceId ?? '', sharedLibraryId: ref.sharedLibraryId ?? '', required: ref.required }] : []),
     ownerName: draft.owner?.name ?? '', ownerEmployeeId: draft.owner?.employeeId ?? '', ownerContact: draft.owner?.contact ?? '',
@@ -145,7 +159,9 @@ function draftOf(value: Form): Draft {
   const employeeId = normalizeEmployeeId(value.ownerEmployeeId) ?? value.ownerEmployeeId.trim()
   return {
     name: value.name.trim(), summary: value.summary.trim(), appearance: { icon: value.icon, accent: value.accent.trim(), background: value.background.trim() },
-    categoryIds: value.categoryIds, tags: lines(value.tags.replaceAll(/[,，]/g, '\n')), starterPrompts: lines(value.starterPrompts), sortOrder: Number(value.sortOrder),
+    categoryIds: value.categoryIds, tags: lines(value.tags.replaceAll(/[,，]/g, '\n')), starterPrompts: lines(value.starterPrompts),
+    // An expert without scenarios omits the key (the stored draft and its digest stay as they were).
+    ...(value.scenarios.length ? { scenarios: value.scenarios } : {}), sortOrder: Number(value.sortOrder),
     builtinTools: BUILTIN_CAPABILITIES.filter(item => value.builtinTools.includes(item)), responsibility: value.responsibility, skills: value.skills,
     tools: [
       ...Object.entries(value.tools).filter(([, state]) => state.selected).map(([toolId, state]) => ({ toolId, required: state.required })),
@@ -170,11 +186,12 @@ function localIssues(value: Form): string[] {
     if (row.sharedLibraryId.trim() && !SHARED_LIBRARY_ID_PATTERN.test(row.sharedLibraryId.trim())) found.push(`「${row.name}」的共享库 ID 格式无效`)
   }
   if (new Set(value.onebox.map(row => row.ref.trim())).size !== value.onebox.length) found.push('个人知识库标识重复')
+  for (const issue of scenarioIssues(value.scenarios)) found.push(issue.index === undefined ? `常用场景：${issue.message}` : `常用场景第 ${issue.index + 1} 个：${issue.message}`)
   return found
 }
 function guard(action: () => void) {
   if (busy.value) return
-  if (dirty.value || distributionDirty.value) confirmation.value = { title: '放弃未保存的修改？', message: '已保存的草稿、已发布的版本和分发设置都会保留。', label: '放弃修改', action }
+  if (dirty.value || distributionDirty.value || scenarioEditing.value) confirmation.value = { title: '放弃未保存的修改？', message: '已保存的草稿、已发布的版本和分发设置都会保留。', label: '放弃修改', action }
   else action()
 }
 function select(id: string) { guard(() => void run(async () => { const result = await call<{ revision: string; expert: Expert }>(`/api/admin/experts/${encodeURIComponent(id)}`); adopt(result.expert, result.revision) })) }
@@ -193,6 +210,7 @@ async function submitCreate() {
 }
 async function saveDraft() {
   if (!current.value || !form.value) return
+  if (scenarioEditing.value) { error.value = '请先保存或取消正在编辑的场景。'; issues.value = []; await nextTick(); errorElement.value?.focus(); return }
   const found = localIssues(form.value)
   if (found.length) { error.value = '请先修正以下问题：'; issues.value = found; await nextTick(); errorElement.value?.focus(); return }
   await run(async () => {
@@ -203,7 +221,8 @@ async function saveDraft() {
 async function publish() {
   const expert = current.value
   if (!expert) return
-  if (dirty.value) { await saveDraft(); if (dirty.value || error.value) return }
+  // Publish what is on screen: save first (refused while a scenario row is still open).
+  if (unsaved.value) { await saveDraft(); if (unsaved.value || error.value) return }
   confirmation.value = {
     title: expert.published ? `发布第 ${expert.published.version + 1} 版？` : '发布这位专家？',
     message: `可见范围内的同事会在下次同步时收到这一版（通常 30 分钟内，打开专家页时立即同步）。${expert.distribution.visibility.mode === 'everyone' ? '当前为全员可见。' : `当前可见：负责人${expert.distribution.visibility.employeeIds.length ? ` + ${expert.distribution.visibility.employeeIds.length} 位同事` : '（仅负责人）'}。`}`,
@@ -225,7 +244,8 @@ async function saveDistribution(next?: Partial<DistributionForm>) {
     const result = await call<{ revision: string; expert: Expert }>(`/api/admin/experts/${encodeURIComponent(expert.id)}/distribution`, {
       method: 'PUT', data: { revision: revision.value, distribution: { status: merged.status, visibility: merged.mode === 'everyone' ? { mode: 'everyone' } : { mode: 'allowlist', employeeIds }, allowClone: merged.allowClone } },
     })
-    const keepForm = dirty.value ? form.value : undefined
+    // The same form object keeps unsaved edits, and its scenario list keeps an open scenario row open.
+    const keepForm = unsaved.value ? form.value : undefined
     adopt(result.expert, result.revision)
     if (keepForm) form.value = keepForm
     await list(); notice.value = merged.status === 'active' ? '分发设置已生效：使用者下次同步时按新范围看到或收回这位专家。' : '已下架：使用者下次同步时会收回这位专家，进行中的对话不受影响。'
@@ -277,18 +297,23 @@ function addOnebox() {
   form.value.onebox.push({ ref: `kb-${index}`, name: '', description: '', spaceId: '', sharedLibraryId: '', required: false })
 }
 function startImport() { guard(() => { importing.value = { phase: 'choose', targetMode: 'create', targetId: '', adoptAllowlist: true, publish: false, toolChoices: {} }; error.value = ''; notice.value = ''; issues.value = [] }) }
-function switchTab(next: 'experts' | 'tools') {
-  if (next === tab.value || busy.value || toolBusy.value) return
-  const go = () => { tab.value = next; toolDirty.value = false; error.value = ''; notice.value = ''; if (next === 'experts') void run(list) }
+function switchTab(next: Tab) {
+  if (next === tab.value || busy.value || childBusy.value) return
+  const go = () => { tab.value = next; toolDirty.value = false; builtinDirty.value = false; error.value = ''; notice.value = ''; if (next === 'experts') void run(list) }
   if (tab.value === 'tools' && toolDirty.value) confirmation.value = { title: '放弃未保存的修改？', message: '工具库中已保存的配置不受影响。', label: '放弃修改', action: go }
+  else if (tab.value === 'builtin' && builtinDirty.value) confirmation.value = { title: '放弃未保存的修改？', message: '已保存的草稿和已发布的场景都会保留。', label: '放弃修改', action: go }
   else guard(go)
 }
 function tabKey(event: KeyboardEvent) {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  const index = TABS.indexOf(tab.value)
+  const target = event.key === 'ArrowRight' ? TABS[(index + 1) % TABS.length] : event.key === 'ArrowLeft' ? TABS[(index + TABS.length - 1) % TABS.length]
+    : event.key === 'Home' ? TABS[0] : event.key === 'End' ? TABS[TABS.length - 1] : undefined
+  if (!target) return
   event.preventDefault()
-  switchTab(tab.value === 'experts' ? 'tools' : 'experts')
+  switchTab(target)
   void nextTick(() => (document.querySelector('.expert-tabs [aria-selected="true"]') as HTMLElement | null)?.focus())
 }
+const tabLabel: Record<Tab, string> = { experts: 'expert-tab-experts', tools: 'expert-tab-tools', builtin: 'expert-tab-builtin' }
 function resolutionText(row: ImportToolRow) {
   if (row.resolution === 'new') return `新增到工具库（${row.libraryKey}）`
   if (row.resolution === 'reuse') return `工具库已有相同配置，直接复用（${row.libraryKey}）`
@@ -348,16 +373,25 @@ function visibilityText(item: Summary) {
 function knowledgeStatus(status: string) { return status === 'ok' ? '可用' : status === 'missing' ? '官网没有这个指标库' : status === 'disabled' ? '已下架' : '负责人尚未同步 OneBox' }
 onMounted(() => run(list))
 onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false); emit('busy', false) })
+/** A package's scenario changes on one line (empty when nothing changed). */
+function scenarioChangeText(changes: NonNullable<Preview['changes']>['scenarios']) {
+  return [
+    changes.added.length ? `新增 ${changes.added.join('、')}` : '', changes.updated.length ? `修改 ${changes.updated.join('、')}` : '',
+    changes.removed.length ? `移除 ${changes.removed.join('、')}` : '', changes.reordered ? '调整了顺序' : '',
+  ].filter(Boolean).join('；')
+}
 </script>
 
 <template>
-  <section class="expert-manager" :aria-busy="busy || toolBusy">
+  <section class="expert-manager" :aria-busy="busy || childBusy">
     <div class="expert-tabs" role="tablist" aria-label="专家分发">
-      <button id="expert-tab-experts" type="button" role="tab" :aria-selected="tab === 'experts'" :tabindex="tab === 'experts' ? 0 : -1" aria-controls="expert-panel" :disabled="busy || toolBusy" @click="switchTab('experts')" @keydown="tabKey">专家</button>
-      <button id="expert-tab-tools" type="button" role="tab" :aria-selected="tab === 'tools'" :tabindex="tab === 'tools' ? 0 : -1" aria-controls="expert-panel" :disabled="busy || toolBusy" @click="switchTab('tools')" @keydown="tabKey">自定义工具</button>
+      <button id="expert-tab-experts" type="button" role="tab" :aria-selected="tab === 'experts'" :tabindex="tab === 'experts' ? 0 : -1" aria-controls="expert-panel" :disabled="busy || childBusy" @click="switchTab('experts')" @keydown="tabKey">专家</button>
+      <button id="expert-tab-tools" type="button" role="tab" :aria-selected="tab === 'tools'" :tabindex="tab === 'tools' ? 0 : -1" aria-controls="expert-panel" :disabled="busy || childBusy" @click="switchTab('tools')" @keydown="tabKey">自定义工具</button>
+      <button id="expert-tab-builtin" type="button" role="tab" :aria-selected="tab === 'builtin'" :tabindex="tab === 'builtin' ? 0 : -1" aria-controls="expert-panel" :disabled="busy || childBusy" @click="switchTab('builtin')" @keydown="tabKey">内置专家场景</button>
     </div>
-    <div id="expert-panel" role="tabpanel" :aria-labelledby="tab === 'experts' ? 'expert-tab-experts' : 'expert-tab-tools'">
+    <div id="expert-panel" role="tabpanel" :aria-labelledby="tabLabel[tab]">
     <ExpertToolLibrary v-if="tab === 'tools'" :csrf="csrf" @error="emit('error', $event)" @dirty="toolDirty = $event" @busy="toolBusy = $event" />
+    <ExpertBuiltinScenarios v-else-if="tab === 'builtin'" :csrf="csrf" @error="emit('error', $event)" @dirty="builtinDirty = $event" @busy="builtinBusy = $event" />
     <template v-else>
     <div class="editor-heading">
       <div><h2>专家分发</h2><p>导入创建者导出的专家包，或直接编辑；设置可见范围后发布，使用者的工作助手会自动收到，无需发版。</p></div>
@@ -378,10 +412,10 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
       </aside>
       <section v-if="current && form && distribution" class="admin-workspace release-workspace">
         <div class="editor-heading">
-          <div><h3>{{ current.draft.name }}</h3><p>{{ dirty ? '有未保存的修改' : current.published ? (current.draftChanged ? `已发布 v${current.published.version}，草稿有未发布的修改` : `已发布 v${current.published.version}`) : '尚未发布' }}</p></div>
+          <div><h3>{{ current.draft.name }}</h3><p>{{ unsaved ? '有未保存的修改' : current.published ? (current.draftChanged ? `已发布 v${current.published.version}，草稿有未发布的修改` : `已发布 v${current.published.version}`) : '尚未发布' }}</p></div>
           <div class="admin-actions">
             <button class="button secondary" :disabled="busy || !dirty" @click="saveDraft">保存草稿</button>
-            <button class="button primary" :disabled="busy || (!dirty && current.published !== undefined && !current.draftChanged)" @click="publish">{{ current.published ? '发布新版本' : '发布' }}</button>
+            <button class="button primary" :disabled="busy || (!unsaved && current.published !== undefined && !current.draftChanged)" @click="publish">{{ current.published ? '发布新版本' : '发布' }}</button>
           </div>
         </div>
         <div class="release-identity">
@@ -421,8 +455,12 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
             <fieldset class="expert-choices"><legend>分类（最多 {{ EXPERT_LIMITS.categories }} 个）</legend><label v-for="category in EXPERT_CATEGORIES" :key="category.id" class="check-label"><input v-model="form.categoryIds" type="checkbox" :value="category.id" />{{ category.name }}<small v-if="!category.enabled">（工作助手未开放此分类筛选）</small></label></fieldset>
             <div class="chapter-fields">
               <label>标签<textarea v-model="form.tags" rows="3" placeholder="每行一个"></textarea><small>最多 {{ EXPERT_LIMITS.tags }} 个。</small></label>
-              <label>Prompt 建议<textarea v-model="form.starterPrompts" rows="3" placeholder="每行一条"></textarea><small>显示在专家卡片上，最多 {{ EXPERT_LIMITS.starterPrompts }} 条。</small></label>
             </div>
+
+            <h4 class="expert-section-title">常用场景</h4>
+            <p class="editor-help expert-scenario-help">使用者在新对话首页或专家卡片上点一下场景，就会把提问模板填进输入框，改完【】里的内容再发送。最多 8 个。旧版工作助手不显示场景，会把场景名称显示为 Prompt 建议。</p>
+            <p v-if="!form.scenarios.length && form.starterPrompts.trim()" class="editor-help expert-scenario-help">当前 Prompt 建议（旧版，只读）：{{ lines(form.starterPrompts).join('；') }}。添加场景后改为显示场景名称。</p>
+            <ScenarioListEditor v-model="form.scenarios" :disabled="busy" :expert-icon="form.icon" @editing="scenarioEditing = $event" />
 
             <h4 class="expert-section-title">职责（AGENTS.md）</h4>
             <label class="release-notes">职责全文<textarea v-model="form.responsibility" class="expert-responsibility" rows="12" spellcheck="false"></textarea><small>{{ size(responsibilityBytes) }} / 64 KiB。选择这位专家的会话会持续遵循这些规则。</small></label>
@@ -431,17 +469,17 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
 
             <h4 class="expert-section-title">技能</h4>
             <div class="admin-actions">
-              <input ref="skillInput" class="file-input" type="file" accept=".zip,.md" tabindex="-1" aria-label="选择技能文件" :disabled="busy || dirty" @change="sendSkill" />
+              <input ref="skillInput" class="file-input" type="file" accept=".zip,.md" tabindex="-1" aria-label="选择技能文件" :disabled="busy || unsaved" @change="sendSkill" />
               <label class="check-label"><input v-model="skillRequired" type="checkbox" />上传为必需技能</label>
-              <button type="button" class="button secondary" :disabled="busy || dirty" @click="skillInput?.click()">上传技能</button>
+              <button type="button" class="button secondary" :disabled="busy || unsaved" @click="skillInput?.click()">上传技能</button>
               <button v-if="uploadName" type="button" class="button secondary" @click="upload?.abort()">取消上传</button>
             </div>
-            <p v-if="dirty" class="editor-help">请先保存草稿，再上传或移除技能。</p>
+            <p v-if="unsaved" class="editor-help">{{ scenarioEditing ? '请先保存或取消正在编辑的场景，再上传或移除技能。' : '请先保存草稿，再上传或移除技能。' }}</p>
             <div v-if="uploadName" class="upload-progress" role="status"><span>{{ uploadName }}</span><progress :value="progress" max="100"></progress>{{ progress }}%</div>
             <article v-for="skill in form.skills" :key="skill.name" class="package-file">
               <div><strong>{{ skill.name }}</strong><small>{{ skill.fileName ?? `${skill.name}.${skill.kind}` }} · {{ size(skill.size) }}</small></div>
               <label class="check-label"><input v-model="skill.required" type="checkbox" />必需</label>
-              <button type="button" :disabled="busy || dirty" @click="detachSkill(skill.name)">移除</button>
+              <button type="button" :disabled="busy || unsaved" @click="detachSkill(skill.name)">移除</button>
             </article>
             <p v-if="!form.skills.length" class="editor-help">还没有技能。</p>
 
@@ -518,9 +556,11 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
             <li v-if="importing.preview.changes.skills.removed.length">移除技能：{{ importing.preview.changes.skills.removed.join('、') }}</li>
             <li v-if="importing.preview.changes.tools.added.length || importing.preview.changes.tools.removed.length">工具：+{{ importing.preview.changes.tools.added.length }} / -{{ importing.preview.changes.tools.removed.length }}</li>
             <li v-if="importing.preview.changes.knowledge.added.length || importing.preview.changes.knowledge.removed.length">知识库：+{{ importing.preview.changes.knowledge.added.length }} / -{{ importing.preview.changes.knowledge.removed.length }}</li>
+            <li v-if="scenarioChangeText(importing.preview.changes.scenarios)">常用场景：{{ scenarioChangeText(importing.preview.changes.scenarios) }}</li>
           </ul>
         </div>
         <dl class="expert-preview-list">
+          <dt>常用场景（{{ importing.preview.expert.scenarios.length }}）</dt><dd>{{ importing.preview.expert.scenarios.join('、') || '无' }}</dd>
           <dt>技能（{{ importing.preview.skills.length }}）</dt><dd>{{ importing.preview.skills.map(skill => `${skill.name}${skill.required ? '（必需）' : ''}`).join('、') || '无' }}</dd>
           <dt>工具（{{ importing.preview.tools.length }}）</dt><dd>{{ importing.preview.tools.map(tool => `${tool.name}${tool.required ? '（必需）' : ''}${tool.known ? '' : '（未知）'}`).join('、') || '无' }}</dd>
           <template v-if="importing.preview.customTools.length"><dt>自定义工具</dt><dd>
@@ -577,6 +617,7 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
 .expert-import-tool small{color:var(--text-tertiary);font-size:11px;overflow-wrap:anywhere}
 .expert-knowledge-chip.is-unsynced,.expert-knowledge-chip.is-disabled{background:#fff4df;color:#8a5300}
 .expert-knowledge-chip.is-missing{background:#fdecec;color:#973d3d}
+.expert-scenario-help{margin:0 0 12px!important}
 @media(max-width:760px){.expert-preview-list{grid-template-columns:1fr}.expert-row{flex-direction:column}}
 @media(prefers-reduced-motion:reduce){.expert-manager *{transition:none!important}}
 </style>
