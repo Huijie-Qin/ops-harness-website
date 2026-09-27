@@ -159,7 +159,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 | GET /updates/archive/:version/:platform/:filename | 目录中登记的文件，支持 HEAD、单段 Range、ETag |
 | GET /api/knowledge/metrics | 已上架的指标知识库元数据目录，带 ETag 与 If-None-Match |
 | GET /api/knowledge/metrics/skill | 全部知识库共用的配套技能文件字节，ETag 为内容 SHA-256 |
-| GET /api/experts/v1/catalog | 当前工号可见的云端专家目录与这些专家引用的自定义工具定义（工号放在 `X-Ops-Employee-Id` 请求头），ETag 按工号区分 |
+| GET /api/experts/v1/catalog | 当前工号可见的云端专家目录与这些专家引用的自定义工具定义（工号放在 `X-Ops-Employee-Id` 请求头）；带 `X-Ops-Expert-Features: scenarios` 时另含专家常用场景与内置专家场景覆盖。ETag 按工号与特性区分 |
 | GET /api/experts/v1/experts/:id/versions/:n/responsibility | 已发布版本的职责全文，不可见一律 404 |
 | GET /api/experts/v1/experts/:id/versions/:n/skills/:name | 已发布版本的技能文件字节，带 `X-Skill-Sha256` |
 
@@ -235,7 +235,8 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 管理员在 `/admin` 的“专家分发”页签导入创建者从工作助手导出的专家包（`*.expert.zip`），或直接新建、编辑专家；设置可见范围后发布，
 可见范围内同事的工作助手在下次同步时收到（打开专家页即同步）。设计与取舍见 [ADR 0022](docs/adr/0022-expert-distribution.md)，
-产品侧见产品仓库 ADR 0026；日常操作、备份与排查见 [专家分发运维](docs/runbooks/expert-distribution.md)。
+产品侧见产品仓库 ADR 0026；日常操作、备份与排查见 [专家分发运维](docs/runbooks/expert-distribution.md)。常用场景与内置专家场景见
+[ADR 0023](docs/adr/0023-expert-scenarios.md)。
 
 - **存储**：`<contentDirectory>/experts/` 下的 `catalog.json`、不可覆盖的 `versions/<专家 ID>/<版本>.json`、按内容哈希保存的
   `skills/`、待确认的 `imports/`（24 小时后清理）与 `.trash/`。备份内容目录即可完整恢复。
@@ -245,6 +246,11 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 - **自定义工具库**：`experts/tools.json`，“自定义工具”页签管理（`GET /api/admin/expert-tools`、`PUT` / `DELETE /api/admin/expert-tools/:key`）。
   导入时按服务名复用或新增，同名不同配置由管理员选择“更新已有工具”或“改名后新增”；保存即对所有引用它的专家生效；
   被专家引用的工具不能删除。只保存凭据项的名称与获取说明，令牌由每位使用者首次使用时在自己电脑上填写。
+- **常用场景**：云端专家的 `scenarios`（最多 8 个，名称、简介、带 `【】` 的提问模板、可选工作模式与图标）跟随专家版本发布；保存即按契约规则校验。
+  公开目录只对请求头 `X-Ops-Expert-Features: scenarios` 返回场景，有场景的专家其 `starterPrompts` 一律为场景名称；响应 `Vary` 含这个请求头。
+- **内置专家场景**：`experts/builtin-scenarios.json`，“内置专家场景”页签管理（`GET /api/admin/expert-builtin-scenarios`、
+  `PUT` / `DELETE /api/admin/expert-builtin-scenarios/:expertId`、`POST .../:expertId/publish`）。已发布的覆盖整体替换该内置专家随产品发布的场景
+  （空列表即隐藏），以目录信封的 `builtinScenarios` 下发给所有读取场景的客户端；恢复为随产品发布即撤下。
 - **安全**：公开接口只读，拒绝浏览器来源（403）、按来源限流、工号不写普通日志；专家包与目录中不含任何令牌、Authorization 头或知识库正文。
   官网不下发专家组合文件，端侧只按声明开关五组基础能力。
 - **契约**：结构来自产品仓库的 `@dsh-ops/expert-distribution-contract`，以 vendor 制品锁定版本（来源见
@@ -252,7 +258,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 错误码：`INVALID_EXPERT_PACKAGE` 400、`EXPERT_PACKAGE_REJECTED` 400、`IMPORT_NOT_FOUND` 404、`EXPERT_NOT_FOUND` 404、
 `EXPERT_SKILL_NOT_FOUND` 404、`NOTHING_TO_PUBLISH` 409、`INVALID_EMPLOYEE_ID` 400、`BROWSER_REJECTED` 403、`REVISION_CONFLICT` 409、
-`INVALID_EXPERT_TOOL` 400、`EXPERT_TOOL_NOT_FOUND` 404、`EXPERT_TOOL_IN_USE` 409。
+`INVALID_EXPERT_TOOL` 400、`EXPERT_TOOL_NOT_FOUND` 404、`EXPERT_TOOL_IN_USE` 409、`INVALID_SCENARIOS` 400、`BUILTIN_EXPERT_NOT_FOUND` 404。
 
 ## 验证与依赖
 
