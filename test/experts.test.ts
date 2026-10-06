@@ -1,5 +1,5 @@
 import { crc32, deflateRawSync } from 'node:zlib'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -287,6 +287,90 @@ test('tampered, foreign or unsupported packages are rejected with reasons', asyn
   assert.equal((await refused.json()).error, 'EXPERT_PACKAGE_REJECTED')
   const discarded = await fetch(`${f.origin}/api/admin/experts/import/${preview.importId}`, { method: 'DELETE', headers: f.headers })
   assert.equal(discarded.status, 200)
+})
+
+// One rule set for a Skill wherever it travels (contract `skill-tree`): what the creator's 我的技能 accepts
+// imports here; what clients from before these rules cannot install is a warning, not a refusal.
+const manifestOf = (name: string, description = `${name} 的说明`) => Buffer.from(`---\nname: ${name}\ndescription: ${description}\n---\n\n# 用法\n`, 'utf8')
+function bigSkill(name = 'big-skill') {
+  const files = [
+    { name: `${name}/SKILL.md`, data: manifestOf(name, '适用场景很多。'.repeat(80)) },
+    { name: `${name}/templates/example/SKILL.md`, data: manifestOf('example') },
+    { name: `${name}/references/empty.md` },
+    { name: `${name}/${Array.from({ length: 18 }, (_, index) => `d${index}`).join('/')}/deep.md`, data: Buffer.from('# 深层文件\n') },
+    { name: '__MACOSX/._SKILL.md', data: Buffer.from('apple double') },
+  ]
+  for (let index = 0; index < 296; index++) files.push({ name: `${name}/references/note-${index}.md`, data: Buffer.from(`# 说明 ${index}\n`) })
+  return archive(files)
+}
+
+test('a package carries what 我的技能 accepts, and the preview names what older clients cannot install', async t => {
+  const f = await fixture(t)
+  const skill = bigSkill()
+  const uploaded = await f.upload('/api/admin/experts/import', expertPackage({ skills: [{ name: 'big-skill', bytes: skill }] }))
+  assert.equal(uploaded.status, 200)
+  const { preview } = await uploaded.json()
+  assert.deepEqual(preview.errors, [])
+  const legacy = preview.warnings.find((warning: string) => warning.startsWith('技能「big-skill」超出旧版工作助手的能力'))
+  assert.ok(legacy, preview.warnings.join('\n'))
+  assert.match(legacy, /301 个条目（旧版上限 256）/)
+  assert.match(legacy, /20 层目录（旧版上限 16）/)
+  assert.match(legacy, /子文件夹里还有 SKILL\.md/)
+  assert.match(legacy, /描述 560 字（旧版上限 500）/)
+  assert.match(legacy, /使用旧版工作助手的同事需先升级才能收到这位专家/)
+  const applied = await f.json(`/api/admin/experts/import/${preview.importId}/apply`, { target: { mode: 'create', id: 'big-ops' }, adoptAllowlist: true, publish: true, revision: (await f.list()).revision })
+  assert.equal(applied.status, 200)
+  const expert = (await (await f.catalog('s00526367')).json()).experts[0]
+  assert.deepEqual(expert.skills.map((item: { name: string, size: number }) => [item.name, item.size]), [['big-skill', skill.length]])
+  const download = await fetch(`${f.origin}/api/experts/v1/experts/${expert.id}/versions/${expert.version}/skills/big-skill`, { headers: { 'X-Ops-Employee-Id': 's00526367' } })
+  assert.equal(download.status, 200)
+  assert.equal(Buffer.compare(Buffer.from(await download.arrayBuffer()), skill), 0)
+
+  // 21 Skills: imported for new clients, flagged for old ones; 31: beyond the expert's limit.
+  const many = (count: number) => Array.from({ length: count }, (_, index) => ({ name: `skill-${index}`, bytes: skillZip(`skill-${index}`) }))
+  const twentyOne = (await (await f.upload('/api/admin/experts/import', expertPackage({ skills: many(21), origin: { expertId: 'twenty-one' } }))).json()).preview
+  assert.deepEqual(twentyOne.errors, [])
+  assert.ok(twentyOne.warnings.includes('这位专家有 21 个技能，超出旧版工作助手的上限 20 个。使用旧版工作助手的同事需先升级才能收到这位专家'))
+  const thirtyOne = await f.upload('/api/admin/experts/import', expertPackage({ skills: many(31), origin: { expertId: 'thirty-one' } }))
+  assert.equal(thirtyOne.status, 400)
+  assert.equal((await thirtyOne.json()).error, 'INVALID_EXPERT_PACKAGE')
+})
+
+test('a Skill that breaks the shared rules is refused with the rule and the limit', async t => {
+  const f = await fixture(t)
+  const rejected = async (bytes: Buffer) => {
+    const response = await f.upload('/api/admin/experts/import', expertPackage({ skills: [{ name: 'push-copywriting', bytes }] }))
+    assert.equal(response.status, 400)
+    const body = await response.json() as { error: string; issues: string[] }
+    assert.equal(body.error, 'INVALID_EXPERT_PACKAGE')
+    return body.issues
+  }
+  const tooMany = [{ name: 'push-copywriting/SKILL.md', data: manifestOf('push-copywriting') }]
+  for (let index = 0; index < 2000; index++) tooMany.push({ name: `push-copywriting/data/f-${index}.md`, data: Buffer.from('x') })
+  assert.deepEqual(await rejected(archive(tooMany)), ['技能「push-copywriting」：有 2001 个文件，超过 2000 个上限'])
+  assert.deepEqual(await rejected(archive([{ name: 'push-copywriting/README.md', data: Buffer.from('没有清单') }])),
+    ['技能「push-copywriting」：压缩包里找不到技能的 SKILL.md：它应在压缩包根目录，或唯一的一级文件夹里'])
+  assert.deepEqual(await rejected(archive([{ name: 'push-copywriting/SKILL.md', data: manifestOf('other-name') }])),
+    ['技能「push-copywriting」：SKILL.md 的 name（other-name）与技能名称（push-copywriting）不一致'])
+  const long = `push-copywriting/${'a'.repeat(121)}.md`
+  assert.deepEqual(await rejected(archive([{ name: 'push-copywriting/SKILL.md', data: manifestOf('push-copywriting') }, { name: long, data: Buffer.from('x') }])),
+    [`技能「push-copywriting」：文件或文件夹名超过 120 个字符：${'a'.repeat(121)}.md`])
+
+  // The same rules when the admin adds a Skill by hand; a large one is accepted with a note about older clients.
+  const created = await f.json('/api/admin/experts', { id: 'push-ops', draft: draft(), revision: (await f.list()).revision })
+  let { revision } = await created.json()
+  const refused = await f.upload('/api/admin/experts/push-ops/skills?name=bad.zip', archive([{ name: 'bad/SKILL.md', data: Buffer.from('# 没有开头的信息块\n') }]), { 'X-Revision': revision })
+  assert.equal(refused.status, 400)
+  assert.deepEqual(await refused.json(), { error: 'INVALID_EXPERT_SKILL', issues: ['SKILL.md 开头缺少用 --- 包起来的 name 与 description，或格式不正确'] })
+  const large = archive([{ name: 'large-data/SKILL.md', data: manifestOf('large-data') }, { name: 'large-data/data.bin', data: randomBytes(6 * 1024 * 1024) }])
+  const accepted = await f.upload('/api/admin/experts/push-ops/skills?name=large-data.zip', large, { 'X-Revision': revision })
+  assert.equal(accepted.status, 200)
+  const body = await accepted.json() as { revision: string; warnings: string[] }
+  revision = body.revision
+  assert.equal(body.warnings.length, 1)
+  assert.match(body.warnings[0]!, /^技能「large-data」超出旧版工作助手的能力：压缩后 6 MB（旧版上限 5 MB）/)
+  const plain = await f.upload('/api/admin/experts/push-ops/skills?name=push-copywriting.zip', skillZip('push-copywriting'), { 'X-Revision': revision })
+  assert.deepEqual((await plain.json()).warnings, [])
 })
 
 function crmTool(extra: Record<string, unknown> = {}) {
