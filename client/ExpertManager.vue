@@ -275,9 +275,10 @@ async function sendSkill(event: Event) {
       if (file.size > EXPERT_LIMITS.skillBytes) throw new ApiError('UPLOAD_TOO_LARGE')
       if (!/\.(zip|md)$/i.test(file.name)) throw new ApiError('INVALID_SKILL_FILE')
       uploadName.value = file.name; progress.value = 0
-      const result = await uploadFile<{ revision: string; expert: Expert }>(`/api/admin/experts/${encodeURIComponent(expert.id)}/skills?name=${encodeURIComponent(file.name)}&required=${skillRequired.value}`, file,
+      const result = await uploadFile<{ revision: string; expert: Expert; warnings?: string[] }>(`/api/admin/experts/${encodeURIComponent(expert.id)}/skills?name=${encodeURIComponent(file.name)}&required=${skillRequired.value}`, file,
         { csrf: props.csrf, revision: revision.value, signal: upload.signal, progress: v => progress.value = v })
-      adopt(result.expert, result.revision); await list(); notice.value = '技能已校验并加入草稿，发布后使用者会收到。'
+      adopt(result.expert, result.revision); await list()
+      notice.value = result.warnings?.length ? `技能已校验并加入草稿。注意：${result.warnings.join('；')}` : '技能已校验并加入草稿，发布后使用者会收到。'
     } catch (e) { if (upload.signal.aborted) notice.value = '上传已取消。'; else throw e }
     finally { uploadName.value = ''; input.value = '' }
   })
