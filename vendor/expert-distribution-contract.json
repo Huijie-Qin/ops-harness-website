@@ -1,19 +1,19 @@
 {
   "name": "@dsh-ops/expert-distribution-contract",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "sourceRepository": "ops-harness",
-  "sourceCommit": "63aab6f885f4aa0d2558dd25d577eb71be133b2d",
+  "sourceCommit": "b43fec1efaf3e6cd9e6602a606dd64de6acee655",
   "sourceWorkingTree": false,
   "sourcePath": "packages/shared/expert-distribution-contract",
-  "artifact": "dsh-ops-expert-distribution-contract-0.2.0-ca918a026d2b.tgz",
-  "sha256": "ca918a026d2b1867e6bc13e805e31c8aa85132418a47ddf43748975e29e7162f",
+  "artifact": "dsh-ops-expert-distribution-contract-0.2.1-a636a63144f8.tgz",
+  "sha256": "a636a63144f8f8721571b919e5b08c207dea780574cbf0984c0cb89f9d235d44",
   "sourceSha256": {
-    "package.json": "4141a04567a2541575d1c21b56df3a3cef891100c3439042e34e45b00959b9b3",
+    "package.json": "3d0ea158b3d824eb86ab2d1e24b210131cdeb9f89186f6f6f78d22da1f88e2fc",
     "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad",
-    "README.md": "559ae64ae443ff5e0ffd3fca42ea2acf1aac1ef74abacd34d45e8342152b6afb",
+    "README.md": "7ce1d2e5e10f7b80436e5dec82b0f3c32c47de0821bf01cf2ae90453d0aaa0b1",
     "src/index.ts": "eb54ef04660176d786412d7033d4414760135e53955b31f25d045aefc9fb527f",
     "src/scenarios.ts": "2b458d8b339d138995b9b5a3ddda3f48ba7f5777c0186ab4847a1a60c069028d",
-    "src/skill-tree.ts": "7792f8460347c4362ae795e3c99544f4e00aa38564a8b8f2f65e321d5adb1f7f"
+    "src/skill-tree.ts": "7628ab3b6237402f439211ce18f6fec795eab726357e4e9fd54ad225823f51f5"
   },
   "packageManager": "pnpm@11.19.0",
   "contractVersion": 1
