@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
-  CatalogSchema, compareVersions, isPrerelease,
-  type Release, type ReleaseCatalog, type ReleasePlatform, type UpdateDecision,
+  CatalogSchema, compareVersions, isUpdateChannelAllowed,
+  type Release, type ReleaseCatalog, type ReleasePlatform, type UpdateDecision, type UpdateChannel,
 } from '@dsh-ops/release-contract'
 import { archiveUrl, releaseNotesUrl } from './website-url.js'
 
@@ -31,10 +31,10 @@ export function visibleReleases(catalog: ReleaseCatalog, now = Date.now()): Rele
     .sort((a, b) => compareVersions(b.version, a.version))
 }
 
-export function decideUpdate(catalog: ReleaseCatalog, query: { installationId: string; currentVersion: string; platform: ReleasePlatform }, websiteUrl: string, now = Date.now()): UpdateDecision {
+export function decideUpdate(catalog: ReleaseCatalog, query: { installationId: string; currentVersion: string; platform: ReleasePlatform; channel?: UpdateChannel | undefined }, websiteUrl: string, now = Date.now()): UpdateDecision {
   const release = visibleReleases(catalog, now).find(r => r.targets[query.platform] &&
     compareVersions(r.version, query.currentVersion) > 0 &&
-    (isPrerelease(query.currentVersion) || !isPrerelease(r.version)) &&
+    isUpdateChannelAllowed(query.currentVersion, r.version, query.channel) &&
     (!r.minimumVersion || compareVersions(query.currentVersion, r.minimumVersion) >= 0) &&
     rolloutBucket(query.installationId, r.version, query.platform) < r.rolloutPercentage)
   if (!release) return { schemaVersion: 1, updateAvailable: false }

@@ -2,6 +2,8 @@
 
 > 本文保留迁移前的决策背景与路径；当前仓库布局和两端配置责任以 [ADR 0014](0014-standalone-website-repository.md) 为准。
 
+> 2026-10-08：新版客户端的正式版 / Beta / RC 更新选择与旧客户端兼容以 [ADR 0024](0024-desktop-update-channels.md) 为准。
+
 - 状态：接受（2026-09-11，用户明确要求实现，官网先使用可配置的本地地址）
 - 参考：dataelement/dsh-desktop，当前参考副本位于 code/dsh-desktop，只读；参考提交 `c7e6a59eec467810adb46032530533667af51f55`。
 

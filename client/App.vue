@@ -3,6 +3,8 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 
 import Icon from './Icon.vue'
 import WorkspacePreview from './WorkspacePreview.vue'
 import HeroAtmosphere from './HeroAtmosphere.vue'
+import ReleaseTypeBadge from './ReleaseTypeBadge.vue'
+import { getReleaseType } from '@dsh-ops/release-contract'
 const GuidePage = defineAsyncComponent(() => import('./GuidePage.vue'))
 const GuideAdmin = defineAsyncComponent(() => import('./GuideAdmin.vue'))
 import development from '../content/development.json'
@@ -20,11 +22,11 @@ const releases = ref<Release[]>([])
 const loading = ref(true)
 const error = ref(false)
 let controller: AbortController | undefined
-const latest = computed(() => releases.value.find(r => !r.version.includes('-')))
+const latest = computed(() => releases.value.find(r => getReleaseType(r.version) === 'stable'))
 const downloadPlatforms = [{ key: 'windows-x64', name: 'Windows', detail: 'Windows 10 / 11 · x64', icon: 'windows', extension: '.exe', label: '下载安装包' }, { key: 'macos-arm64', name: 'macOS', detail: 'Apple Silicon · M 系列芯片', icon: 'laptop', extension: '.dmg', label: '下载 DMG' }] as const
 function downloadFor(platform: string, extension: string) {
   for (const release of releases.value) {
-    if (release.version.includes('-')) continue
+    if (getReleaseType(release.version) !== 'stable') continue
     const download = release.downloads.find(d => d.platform === platform && d.name.endsWith(extension))
     if (download) return { ...download, version: release.version }
   }
@@ -87,7 +89,7 @@ const features = [
     <GuidePage v-else-if="page === 'guide'" />
     <GuideAdmin v-else-if="page === 'admin'" />
     <template v-else>
-      <section class="page-heading container"><span class="eyebrow text-only">更新说明</span><h1>每次更新，<br />让工作更进一步。</h1><p>了解新增能力、体验改进，以及当前可下载的版本。</p></section><section class="release-list container"><div v-if="error" class="notice" role="alert">更新记录暂时无法加载。<button class="text-button" @click="refresh">重试</button></div><p v-else-if="loading" role="status">正在加载更新记录…</p><article v-for="release in releases" :id="`v${release.version}`" :key="release.version" class="release-entry"><div class="release-meta"><span class="version-tag">v{{ release.version }}</span><time :datetime="release.publishedAt">{{ date(release.publishedAt) }}</time><span class="release-channel">{{ release.version.includes('-') ? '预览版' : '正式版' }}</span></div><div><h2>{{ release.title }}</h2><ul><li v-for="note in release.notes" :key="note">{{ note }}</li></ul><div class="release-downloads"><a v-for="download in release.downloads" :key="download.name" :href="download.url" class="text-link"><Icon name="download" :size="16" />{{ download.platform === 'windows-x64' ? 'Windows' : 'macOS' }} · {{ download.name.split('.').at(-1)!.toUpperCase() }}<span>{{ size(download.size) }}</span></a></div></div></article><article v-if="!loading && !releases.length" class="release-entry development-entry"><div class="release-meta"><span class="version-tag muted">开发中</span><span class="release-channel">尚未发布安装包</span></div><div><h2>{{ development.title }}</h2><ul><li v-for="note in development.notes" :key="note">{{ note }}</li></ul><p class="muted-note">以下为当前开发内容。正式版本及下载链接将在完成发布后显示。</p></div></article></section>
+      <section class="page-heading container"><span class="eyebrow text-only">更新说明</span><h1>每次更新，<br />让工作更进一步。</h1><p>了解新增能力、体验改进，以及当前可下载的版本。</p><p class="release-channel-note">应用默认接收正式版。可在桌面应用的“设置 → 帮助”开启测试版更新，接收 Beta / RC；其他预览版本仅供手动下载。</p></section><section class="release-list container"><div v-if="error" class="notice" role="alert">更新记录暂时无法加载。<button class="text-button" @click="refresh">重试</button></div><p v-else-if="loading" role="status">正在加载更新记录…</p><article v-for="release in releases" :id="`v${release.version}`" :key="release.version" class="release-entry"><div class="release-meta"><span class="version-tag">v{{ release.version }}</span><time :datetime="release.publishedAt">{{ date(release.publishedAt) }}</time><ReleaseTypeBadge :version="release.version" /></div><div><h2>{{ release.title }}</h2><ul><li v-for="note in release.notes" :key="note">{{ note }}</li></ul><div class="release-downloads"><a v-for="download in release.downloads" :key="download.name" :href="download.url" class="text-link"><Icon name="download" :size="16" />{{ download.platform === 'windows-x64' ? 'Windows' : 'macOS' }} · {{ download.name.split('.').at(-1)!.toUpperCase() }}<span>{{ size(download.size) }}</span></a></div></div></article><article v-if="!loading && !releases.length" class="release-entry development-entry"><div class="release-meta"><span class="version-tag muted">开发中</span><span class="release-channel">尚未发布安装包</span></div><div><h2>{{ development.title }}</h2><ul><li v-for="note in development.notes" :key="note">{{ note }}</li></ul><p class="muted-note">以下为当前开发内容。正式版本及下载链接将在完成发布后显示。</p></div></article></section>
     </template>
   </main>
   <footer v-if="page !== 'admin'" class="site-footer container"><a class="brand" href="/"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><p>为日常工作而生。</p><div><a href="/guide">使用指南</a><a href="/releases">更新说明</a><span>© {{ new Date().getFullYear() }} 终端云工作助手</span></div></footer>

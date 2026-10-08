@@ -88,6 +88,8 @@ pnpm start
 
 已发布版本可修改标题、更新说明、上下架状态；安装包不可覆盖。草稿及其文件可移至本地回收目录。发布瞬间参与当前自动更新策略，网页新版本默认立即发布、100% 灰度；更细的发布时间、最低版本与灰度策略继续使用 CLI/受控目录维护。
 
+版本类型由 SemVer 自动识别，页面与发布确认显示正式版、Beta 测试版、RC 候选版或其他预览版。新版客户端的正式版频道只接收正式版；测试版频道同时接收正式版、`-beta` 和 `-rc` 首段的版本，排除 `-alpha`、`-dev` 等其他预览版。发布确认会列出新客户端的更新受众，并提示旧客户端只接收正式版；官网更新页仍允许手动下载全部已上架且已到发布时间的版本，首页默认下载只提供正式版。详见 [ADR 0024](docs/adr/0024-desktop-update-channels.md)。
+
 先按 Desktop 文档在目标平台生成安装包。Windows 必须是 NSIS EXE（自动升级），可附 portable ZIP（手工下载）；macOS arm64 必须包含 ZIP（自动升级），可附 DMG（手工安装）。不支持同版本覆盖，应递增产品仓库的 `apps/desktop/package.json` 的版本重新构建。
 
 也可以使用原有命令行流程：创建一份发布说明 JSON，例如 `content/release-notes.example.json`。从仓库根目录运行：
@@ -98,7 +100,7 @@ pnpm release --version 0.2.0 --platform windows-x64 --input /path/to/desktop-art
 pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac-artifacts --notes content/release-notes.example.json --rollout 100
 ```
 
-**CLI 的 `--input`、`--notes`、`--config` 相对路径基于本官网仓库根目录**；可使用绝对路径。`--config /path/to/website.json` 指定完整官网配置，优先于 `DSH_OPS_WEBSITE_CONFIG`；两者都未指定时使用 `config/website.json`。发布 CLI 不需要管理员密码。示例版本必须与真实产物版本一致，不会自动改写应用版本。文件名需包含独立的版本片段；Windows portable ZIP 还需包含 `x64`，macOS 文件名需包含 `arm64`，与当前构建命名一致。混合输入目录按平台筛选。发布工具自动计算大小和 SHA-512，不信任手填哈希。
+**CLI 的 `--input`、`--notes`、`--config` 相对路径基于本官网仓库根目录**；可使用绝对路径。`--config /path/to/website.json` 指定完整官网配置，优先于 `DSH_OPS_WEBSITE_CONFIG`；两者都未指定时使用 `config/website.json`。发布 CLI 不需要管理员密码。示例版本必须与真实产物版本一致，不会自动改写应用版本。文件名按完整版本和构建尾缀匹配：NSIS 为 `<product> Setup <version>.exe`，Windows portable ZIP 为 `<product>-<version>-portable-x64.zip`，macOS 为 `<product>-<version>-arm64.zip/.dmg`，保留对应 blockmap 命名；带 x64 尾缀的 EXE 也兼容。混合输入目录按完整版本和平台筛选，`0.3.0` 不会匹配 `0.3.0-beta.1`，`beta.1` 不会匹配 `beta.10`。发布工具自动计算大小和 SHA-512，不信任手填哈希；这不检查安装包内部的版本字段。
 
 工具会取得独占发布锁、复制产物到临时目录、计算哈希、验证契约，先提交不可变的 `archive/<version>/<platform>/`，再原子替换 `catalog.json`。同版两个平台共享完全相同的标题与说明。失败不会宣告发布成功；进程崩溃后的 `.publish.lock` 和孤立归档需由发布人员确认没有其他发布进程后检查处理，不自动删除。禁止直接覆盖归档内的文件。
 
@@ -116,7 +118,7 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 
 `catalog.json` 使用 `@dsh-ops/release-contract` 的严格 schema。每版可配置 `enabled`、`rolloutPercentage`（0–100）、`minimumVersion`、`publishedAt`。策略变更应停止发布写入，校验整份目录后用同目录临时文件 + rename 替换；不要在服务读取时原地截断文件。目录损坏时 API 返回 503 并保留原文件。
 
-灰度只控制应用内升级；官网展示所有已启用且到达发布时间的版本并允许手动下载。稳定版不会升级到预览版；同版、低版、未启用、不匹配平台、未达到最低版本和不在灰度分组的安装实例都不会获得更新。灰度按安装 UUID + 版本 + 平台稳定分组，不记录设备、用户、会话或密钥。
+灰度只控制应用内升级；官网展示所有已启用且到达发布时间的版本并允许手动下载。新版客户端按保存的 `stable` / `beta` 选择筛选，不再根据当前版本推断频道；关闭测试版后不会降级，已有 Beta / RC 用户等待更高正式版。同版、低版、未启用、不匹配平台、未达到最低版本和不在灰度分组的安装实例都不会获得更新。灰度按安装 UUID + 版本 + 平台稳定分组，频道不加入哈希，不记录设备、用户、会话或密钥。
 
 ## 管理接口
 
@@ -144,10 +146,12 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 ## 公开 API
 
 ```http
-GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&currentVersion=0.1.0&platform=windows-x64
+GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&currentVersion=0.2.0&platform=windows-x64&channel=stable
 ```
 
 无更新：`{"schemaVersion":1,"updateAvailable":false}`。有更新返回 `version`、`platform`、固定版本的 `feedUrl`、`releaseNotesUrl`、`artifact: {name, size, sha512}`。协议由产品仓库的 `packages/shared/release-contract/src/index.ts` 维护，官网使用锁定的同包制品，见 [共享协议来源与更新](vendor/README.md)。
+
+`channel` 可选且仅允许 `stable` / `beta`；未知、空值、重复参数均返回 `400 INVALID_UPDATE_QUERY`。新版客户端必须显式传入用户选择。缺席时统一按 `stable` 处理，无论当前安装正式版还是预览版，都只接收更高正式版；旧三参数请求继续有效。响应与固定版本 feed 形状仍为 schemaVersion 1，继续使用 `latest.yml` / `latest-mac.yml`，不新增 `beta.yml`。部署先升级官网再发布新版客户端；新客户端不得在失败后省略 `channel` 静默回退。
 
 | 接口 | 用途 |
 | --- | --- |
@@ -270,7 +274,7 @@ pnpm check
 pnpm build
 ```
 
-运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
+运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.3 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
 
 Windows x64 上的真实 Desktop 更新烟测由产品仓库执行：先在官网运行 `pnpm build`，再在产品仓库设置 `DSH_OPS_WEBSITE_PROJECT` 为官网的绝对路径并运行 `pnpm desktop:smoke:updates`。这只用于跨仓库集成验收，日常运行不需要该变量。
 

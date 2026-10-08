@@ -1,18 +1,18 @@
 {
   "name": "@dsh-ops/release-contract",
-  "version": "0.1.1",
-  "sourceRepository": "ops-harness (dsh_plugins checkout)",
-  "sourceCommit": "a60911a2b4285aeae970da63f58b839e7061219c",
+  "version": "0.1.3",
+  "sourceRepository": "ops-harness",
+  "sourceCommit": "98c49e59f33f6a8482230ab3112f84702fc50891",
   "sourcePath": "packages/shared/release-contract",
-  "artifact": "dsh-ops-release-contract-0.1.1.tgz",
-  "sha256": "ac8f52abdb35a52ae573a8c695d8e9fe1716bbbe7a3d6872c553fe11bfe1276c",
+  "artifact": "dsh-ops-release-contract-0.1.3.tgz",
+  "sha256": "a7ee780d468ceaab2b7656e86f16ed7c10f5e7ea7b954ca94c1850bc0f4c64b5",
   "sourceSha256": {
-    "src/index.ts": "649c632682355fa4d4307e9246f486c8eee7196d5765a6111c52b3e3d7288003",
-    "package.json": "2497c25c87e439103b65025bd2ec73a31d1f3e273ef5a024bf11ed7c2e6a5210",
+    "src/index.ts": "b231f0b408380217667500bdea5ba445f721c3f68f1aeb63e3595cd8b77d7d6b",
+    "package.json": "d0292bf92cfb273b48cc2d46f0b5c78c08c1a7cad566f19156463196c95b19b6",
     "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad",
-    "README.md": "19464590149aaf4268a9250f0d3dfd3e45a0fec6bc30afa555cc1629b89599f5"
+    "README.md": "46f89120df142a02f9f9686e3146318e38d94a2c177f200a42ee571069f3a78b"
   },
   "packageManager": "pnpm@11.19.0",
   "protocolSchemaVersion": 1,
-  "sourceWorkingTree": true
+  "sourceWorkingTree": false
 }
