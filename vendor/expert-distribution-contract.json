@@ -1,18 +1,19 @@
 {
   "name": "@dsh-ops/expert-distribution-contract",
-  "version": "0.1.1",
+  "version": "0.2.2",
   "sourceRepository": "ops-harness",
-  "sourceCommit": "b00cca186b0218353ff2bc63af1bd00badbfaa9f",
+  "sourceCommit": "ca33fb8f4c1d106273bca24711401b5d2f73b5e8",
   "sourceWorkingTree": false,
   "sourcePath": "packages/shared/expert-distribution-contract",
-  "artifact": "dsh-ops-expert-distribution-contract-0.1.1-7fa7fe3869fd.tgz",
-  "sha256": "7fa7fe3869fdeb4b693e78f926397ba121488e7612acf7168746c2755def4f03",
+  "artifact": "dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz",
+  "sha256": "eb571c3166d585a85f947bb52b6b6fbd9a9cd233fca3ec4556c662bee00cb3fe",
   "sourceSha256": {
-    "package.json": "d7eccfacf4439fa7e2182316fa0fce68878d9b358d1b31b0ad4572acaa10eca6",
+    "package.json": "c116a431a995010ec1b4a459a5b3828ae19c3a7d9216f5ea4e309407164df0a8",
     "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad",
-    "README.md": "475e3c42e21da60077ed11748e216dea1519fa7cd77b612a2eebf613c68ac69f",
-    "src/index.ts": "96e96a464c71943526270326509a7e1acd693dd6016d8bfc83e229bcdafcbc46",
-    "src/scenarios.ts": "2b458d8b339d138995b9b5a3ddda3f48ba7f5777c0186ab4847a1a60c069028d"
+    "README.md": "241d33684329d0273604aad98d1e67e11a0f4f7465284208318391572c92c2ba",
+    "src/index.ts": "eb54ef04660176d786412d7033d4414760135e53955b31f25d045aefc9fb527f",
+    "src/scenarios.ts": "2b458d8b339d138995b9b5a3ddda3f48ba7f5777c0186ab4847a1a60c069028d",
+    "src/skill-tree.ts": "2b26dc4f0a6b6fc748457ceffef56d9ede0ab6657c26004ed71c315a392bef07"
   },
   "packageManager": "pnpm@11.19.0",
   "contractVersion": 1

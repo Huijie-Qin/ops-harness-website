@@ -90,12 +90,12 @@ export function parseSkillFrontmatter(bytes: Buffer): { name: string; descriptio
 
 export type ArchiveEntry = { name: string; method: number; compressed: number; size: number; crc: number; offset: number }
 /** Bounds of one archive read and the error it fails with; the defaults are the companion Skill limits. */
-export type ArchiveLimits = { maxBytes: number; maxEntries: number; maxExtractedBytes: number; code: string }
+export type ArchiveLimits = { maxBytes: number; maxEntries: number; maxExtractedBytes: number; code: string; /** Levels of an entry name (default 16). */ maxDepth?: number }
 const skillArchiveLimits: ArchiveLimits = { maxBytes: maxSkillFileBytes, maxEntries: maxSkillArchiveEntries, maxExtractedBytes: maxSkillArchiveBytes, code: 'INVALID_SKILL_FILE' }
-function archiveName(name: string, code: string) {
+function archiveName(name: string, code: string, maxDepth = 16) {
   if (!name || name.length > 255 || name.includes('\\') || name.includes('\0') || /^[A-Za-z]:/.test(name)) return fail(code)
   const segments = name.split('/')
-  if (segments.length > 16) return fail(code)
+  if (segments.length > maxDepth) return fail(code)
   segments.forEach((segment, index) => {
     if (segment === '.' || segment === '..') return fail(code)
     if (!segment && index !== segments.length - 1) return fail(code)
@@ -132,7 +132,7 @@ export function readArchive(bytes: Buffer, limits: ArchiveLimits = skillArchiveL
     if (method !== 0 && method !== 8) return fail()
     if (entryDisk !== 0 || compressed === 0xffffffff || plain === 0xffffffff || header === 0xffffffff) return fail()
     if ((external >>> 16 & 0xf000) === 0xa000) return fail()
-    const name = archiveName(bytes.toString('utf8', cursor + 46, cursor + 46 + nameLength), limits.code)
+    const name = archiveName(bytes.toString('utf8', cursor + 46, cursor + 46 + nameLength), limits.code, limits.maxDepth)
     const directory = name.endsWith('/')
     if (flags & 0x8 && !directory && (!compressed || !plain)) return fail()
     if (directory && plain) return fail()
@@ -150,7 +150,8 @@ export function readArchive(bytes: Buffer, limits: ArchiveLimits = skillArchiveL
   if (cursor !== eocd) return fail()
   return entries
 }
-export function extractArchiveEntry(bytes: Buffer, entry: ArchiveEntry, code = 'INVALID_SKILL_FILE'): Buffer {
+/** `copy: false` returns a stored entry as a view of `bytes` (a package of up to 1 GB is not copied entry by entry). */
+export function extractArchiveEntry(bytes: Buffer, entry: ArchiveEntry, code = 'INVALID_SKILL_FILE', copy = true): Buffer {
   const at = entry.offset
   if (at + 30 > bytes.length || bytes.readUInt32LE(at) !== 0x04034b50) return fail(code)
   const flags = bytes.readUInt16LE(at + 6), method = bytes.readUInt16LE(at + 8)
@@ -161,7 +162,7 @@ export function extractArchiveEntry(bytes: Buffer, entry: ArchiveEntry, code = '
   if (from + entry.compressed > bytes.length) return fail(code)
   const raw = bytes.subarray(from, from + entry.compressed)
   let data: Buffer
-  try { data = entry.method === 0 ? Buffer.from(raw) : inflateRawSync(raw, { maxOutputLength: Math.max(entry.size, 1) }) }
+  try { data = entry.method === 0 ? (copy ? Buffer.from(raw) : raw) : inflateRawSync(raw, { maxOutputLength: Math.max(entry.size, 1) }) }
   catch { return fail(code) }
   if (data.length !== entry.size || crc32(data) !== entry.crc) return fail(code)
   return data

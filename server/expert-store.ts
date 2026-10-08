@@ -6,7 +6,7 @@ import { z } from 'zod'
 import {
   AppearanceSchema, BUILTIN_CAPABILITIES, BUILTIN_TOOLS, BUILTIN_TOOL_IDS, BuiltinCapabilitySchema, CONTRACT_VERSION,
   CATALOG_SCHEMA_VERSION, CUSTOM_TOOL_KEY_PATTERN, CustomToolDefinitionSchema, EXPERT_CATEGORY_IDS, EXPERT_FEATURE_SCENARIOS, EXPERT_ID_PATTERN, EXPERT_LIMITS,
-  ExpertPackageDefinitionSchema, ExpertPackageManifestSchema, KnowledgeRefSchema, OwnerSchema, PACKAGE_DEFINITION_FILE,
+  ExpertPackageDefinitionSchema, ExpertPackageManifestSchema, KnowledgeRefSchema, LEGACY_CLIENT_LIMITS, OwnerSchema, PACKAGE_DEFINITION_FILE,
   PACKAGE_MANIFEST_FILE, PACKAGE_RESPONSIBILITY_FILE, RESERVED_SKILL_NAMES, RESERVED_SKILL_PREFIX, SKILL_NAME_PATTERN, ScenariosSchema, ToolRefSchema,
   VisibilitySchema, customToolPortabilityIssues, deriveStarterPrompts, hasControlCharacters, isExpertVisible, presetIdForCloudExpert, responsibilityIssue,
   scenarioIssues,
@@ -15,7 +15,8 @@ import {
 } from '@dsh-ops/expert-distribution-contract'
 import { GuideError, revisionOf } from './guide-store.js'
 import { atomicJson, missing, readJson, receiveFile, safeDirectory, withLock } from './admin-files.js'
-import { extractArchiveEntry, inspectSkillArchive, parseSkillFrontmatter, readArchive, type ArchiveEntry, type KnowledgeStore } from './knowledge-store.js'
+import { extractArchiveEntry, readArchive, type ArchiveEntry, type KnowledgeStore } from './knowledge-store.js'
+import { checkExpertSkill, ExpertSkillProblem, type ExpertSkillCheck } from './expert-skill.js'
 import { BuiltinScenarioStore, scenarioIssueText } from './builtin-scenario-store.js'
 import { maxSkillFileName } from '../shared/knowledge.js'
 
@@ -162,6 +163,8 @@ interface ParsedPackage {
   definition: ExpertPackageDefinition
   responsibility: string
   skills: Map<string, { bytes: Buffer; sha256: string }>
+  /** What clients from before contract 0.2 cannot install (the preview warns, the import goes on). */
+  legacy: string[]
 }
 
 const BOM_PREFIX = new RegExp('^' + String.fromCharCode(0xfeff))
@@ -172,6 +175,16 @@ function utf8Size(value: string) { return Buffer.byteLength(value, 'utf8') }
 function knowledgeKey(ref: KnowledgeRef) { return ref.kind === 'metric' ? `metric:${ref.knowledgeId}` : `onebox:${ref.ref}` }
 function knowledgeLabel(ref: KnowledgeRef) { return ref.kind === 'metric' ? ref.name ?? ref.knowledgeId : ref.name }
 function toolKey(ref: ToolRef) { return 'toolId' in ref ? ref.toolId : `custom:${ref.customTool}` }
+/**
+ * Skills, or an expert, beyond what clients released before contract 0.2 install: those colleagues only miss this
+ * expert until they update (the catalog and the install go expert by expert). Empty when everyone receives it.
+ */
+function legacyWarnings(skills: ReadonlyArray<{ name: string; legacy: string[] }>, count: number): string[] {
+  const upgrade = '使用旧版工作助手的同事需先升级才能收到这位专家'
+  const warnings = skills.filter(skill => skill.legacy.length).map(skill => `技能「${skill.name}」超出旧版工作助手的能力：${skill.legacy.join('、')}。${upgrade}`)
+  if (count > LEGACY_CLIENT_LIMITS.skills) warnings.push(`这位专家有 ${count} 个技能，超出旧版工作助手的上限 ${LEGACY_CLIENT_LIMITS.skills} 个。${upgrade}`)
+  return warnings
+}
 /** Library revision of a definition: the digest of its content (a re-save without change keeps it). */
 function toolRevision(definition: CustomToolDefinition) { return sha256(Buffer.from(JSON.stringify(definition), 'utf8')) }
 /** Same service configuration, the key aside (names, slots and wording included: anything a user would see). */
@@ -589,9 +602,14 @@ export class ExpertStore {
     }
   }
 
-  /** Validate one uploaded Skill file and store it by content hash (identical files are reused). */
-  private async storeSkill(bytes: Buffer, kind: 'zip' | 'md') {
-    const skill = kind === 'zip' ? inspectSkillArchive(bytes) : parseSkillFrontmatter(bytes)
+  /**
+   * Check one Skill file by the rules every side of expert distribution applies (`checkExpertSkill`) and store it by
+   * content hash (identical files are reused). `expectedName`: the name it travels under in a package.
+   */
+  private async storeSkill(bytes: Buffer, kind: 'zip' | 'md', expectedName?: string) {
+    let skill: ExpertSkillCheck
+    try { skill = checkExpertSkill(bytes, kind, expectedName) }
+    catch (error) { if (error instanceof ExpertSkillProblem) return invalid(error.problems, 'INVALID_EXPERT_SKILL'); throw error }
     const hash = sha256(bytes)
     await safeDirectory(this.root); await safeDirectory(this.skills)
     const stored = path.join(this.skills, `${hash}.${kind}`)
@@ -606,7 +624,7 @@ export class ExpertStore {
       try { await handle.writeFile(bytes); await handle.sync() } finally { await handle.close() }
       await rename(temp, stored)
     }
-    return { name: skill.name, sha256: hash, size: bytes.length, kind }
+    return { name: skill.name, sha256: hash, size: bytes.length, kind, legacy: skill.legacy }
   }
   async attachSkill(id: string, fileName: string, required: boolean, req: IncomingMessage, expected: unknown) {
     if (!fileName || fileName.length > maxSkillFileName || [...fileName].some(char => char === '/' || char === '\\' || char.charCodeAt(0) < 32)) return fail('INVALID_SKILL_FILE')
@@ -614,15 +632,18 @@ export class ExpertStore {
     await safeDirectory(this.root); await safeDirectory(this.skills)
     const file = await receiveFile(req, this.skills, EXPERT_LIMITS.skillBytes)
     try {
-      const stored = await this.storeSkill(await readFile(file.temp), kind)
+      const { legacy, ...stored } = await this.storeSkill(await readFile(file.temp), kind)
       if (RESERVED_SKILL_NAMES.has(stored.name) || stored.name.startsWith(RESERVED_SKILL_PREFIX)) return invalid([`技能名称 ${stored.name} 为系统保留`])
-      return await this.change(expected, async current => {
+      let count = 0
+      const result = await this.change(expected, async current => {
         const record = this.found(current, id)
         const skills = record.draft.skills.filter(skill => skill.name !== stored.name)
         if (skills.length >= EXPERT_LIMITS.skills) return fail('SKILL_LIMIT', 409)
+        count = skills.length + 1
         const draft = { ...record.draft, skills: [...skills, { ...stored, required, fileName }] }
         return this.replaceRecord(current, { ...record, draft, updatedAt: new Date(this.now()).toISOString() })
       })
+      return { ...result, warnings: legacyWarnings([{ name: stored.name, legacy }], count) }
     } finally { await unlink(file.temp).catch(error => { if (!missing(error)) throw error }) }
   }
   async detachSkill(id: string, name: string, expected: unknown) {
@@ -665,7 +686,7 @@ export class ExpertStore {
     const read = (name: string) => {
       const entry = byName.get(name)
       if (!entry) return invalid([`专家包缺少 ${name}`], 'INVALID_EXPERT_PACKAGE')
-      return extractArchiveEntry(bytes, entry, 'INVALID_EXPERT_PACKAGE')
+      return extractArchiveEntry(bytes, entry, 'INVALID_EXPERT_PACKAGE', false)
     }
     const json = (name: string) => {
       try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(read(name)).replace(BOM_PREFIX, '')) as unknown }
@@ -694,13 +715,14 @@ export class ExpertStore {
     const issue = responsibilityIssue(responsibility)
     if (issue) invalid([issue], 'INVALID_EXPERT_PACKAGE')
     const skills = new Map<string, { bytes: Buffer; sha256: string }>()
+    const checked: Array<{ name: string; legacy: string[] }> = []
     for (const skill of definition.skills) {
       const data = contents.get(skill.file)
       if (!data) return invalid([`专家包缺少技能 ${skill.name}`], 'INVALID_EXPERT_PACKAGE')
       if (data.length !== skill.size || sha256(data) !== skill.sha256) invalid([`技能 ${skill.name} 与定义记录的校验值不一致`], 'INVALID_EXPERT_PACKAGE')
-      let inspected: { name: string }
-      try { inspected = inspectSkillArchive(data) } catch { return invalid([`技能 ${skill.name} 的压缩包无效：需恰好一个 SKILL.md，目录名与 name 一致`], 'INVALID_EXPERT_PACKAGE') }
-      if (inspected.name !== skill.name) invalid([`技能 ${skill.name} 的 SKILL.md 名称为 ${inspected.name}`], 'INVALID_EXPERT_PACKAGE')
+      // The same rules as the creator's 我的技能 and every client's install, with the reasons spelled out.
+      try { checked.push({ name: skill.name, legacy: checkExpertSkill(data, 'zip', skill.name).legacy }) }
+      catch (error) { if (error instanceof ExpertSkillProblem) return invalid(error.problems.map(problem => `技能「${skill.name}」：${problem}`), 'INVALID_EXPERT_PACKAGE'); throw error }
       skills.set(skill.name, { bytes: data, sha256: skill.sha256 })
     }
     for (const path of listed) {
@@ -708,7 +730,7 @@ export class ExpertStore {
         invalid([`专家包里的 ${path} 没有被专家定义引用`], 'INVALID_EXPERT_PACKAGE')
       }
     }
-    return { manifest, definition, responsibility, skills }
+    return { manifest, definition, responsibility, skills, legacy: legacyWarnings(checked, definition.skills.length) }
   }
   private async previewOf(importId: string, parsed: ParsedPackage, expiresAt: string, current: ExpertDocument, choices: Record<string, ToolChoice> = {}, strict = false): Promise<ImportPreview & { resolved: Awaited<ReturnType<ExpertStore['resolveTools']>> }> {
     const { manifest, definition } = parsed
@@ -737,6 +759,7 @@ export class ExpertStore {
       for (const warning of row.warnings) warnings.push(`工具「${row.name}」：${warning}`)
       if (row.transport === 'stdio') warnings.push(`工具「${row.name}」会在使用者电脑上运行命令 ${[row.command, ...row.args].join(' ')}，使用者首次使用时需要本人确认`)
     }
+    warnings.push(...parsed.legacy)
     errors.push(...resolved.errors)
     // A same-name conflict is the admin's choice in the preview; applying without one is refused.
     if (strict) errors.push(...resolved.missingChoices)
@@ -850,7 +873,7 @@ export class ExpertStore {
     const result = await this.change(expected, async current => {
       const preview = await this.previewOf(importId, parsed, new Date(this.now() + IMPORT_TTL_MS).toISOString(), current, request.data.tools, true)
       if (preview.errors.length) return invalid(preview.errors, 'EXPERT_PACKAGE_REJECTED')
-      for (const [, skill] of parsed.skills) await this.storeSkill(skill.bytes, 'zip')
+      for (const [name, skill] of parsed.skills) await this.storeSkill(skill.bytes, 'zip', name)
       // Library entries first: the draft references them by key. An entry an update replaces is backed up.
       const { writes, mapping } = preview.resolved
       if (writes.length) {
