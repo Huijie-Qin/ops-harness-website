@@ -784,3 +784,20 @@ test('scenario icons are checked on every write and travel with the scenario to 
   assert.deepEqual(override.scenarios, withIcons)
   BuiltinScenarioOverrideSchema.parse(override)
 })
+
+// Contract 0.2.1/0.2.2: what a Skill installed into its own folder while it ran (a dependency install and its lock file, a checkout) is not
+// content: not counted against the 2000 files and no reason to refuse the package.
+test('a Skill carrying node_modules, a lock file and .git imports, without them counted', async t => {
+  const f = await fixture(t)
+  const files: { name: string; data?: Buffer }[] = [
+    { name: 'runs-npm/SKILL.md', data: manifestOf('runs-npm') },
+    { name: 'runs-npm/package.json', data: Buffer.from('{}') },
+    { name: 'runs-npm/.git/HEAD', data: Buffer.from('ref: refs/heads/main') },
+    { name: 'runs-npm/package-lock.json', data: Buffer.from('{}') },
+  ]
+  for (let index = 0; index < 2100; index++) files.push({ name: `runs-npm/node_modules/dep-${index}/index.js`, data: Buffer.from('x') })
+  const uploaded = await f.upload('/api/admin/experts/import', expertPackage({ skills: [{ name: 'runs-npm', bytes: archive(files) }], origin: { expertId: 'runs-npm' } }))
+  assert.equal(uploaded.status, 200)
+  const { preview } = await uploaded.json()
+  assert.deepEqual(preview.errors, [])
+})

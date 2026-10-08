@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@dsh-ops/expert-distribution-contract':
-        specifier: file:vendor/dsh-ops-expert-distribution-contract-0.2.0-ca918a026d2b.tgz
-        version: file:vendor/dsh-ops-expert-distribution-contract-0.2.0-ca918a026d2b.tgz
+        specifier: file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz
+        version: file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz
       '@dsh-ops/release-contract':
         specifier: file:vendor/dsh-ops-release-contract-0.1.1.tgz
         version: file:vendor/dsh-ops-release-contract-0.1.1.tgz
@@ -74,9 +74,9 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@dsh-ops/expert-distribution-contract@file:vendor/dsh-ops-expert-distribution-contract-0.2.0-ca918a026d2b.tgz':
-    resolution: {integrity: sha512-wj8n+TC6LlXsADzW/K4FppsE2FjopLE6+3AMvfbHvzOCYZolzQoQnvg/QGKTE+rFL358PaQVhyg96JvdUd93Ag==, tarball: file:vendor/dsh-ops-expert-distribution-contract-0.2.0-ca918a026d2b.tgz}
-    version: 0.2.0
+  '@dsh-ops/expert-distribution-contract@file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz':
+    resolution: {integrity: sha512-51qA441VFsBBwK+j7YBZmksHQTWY9eIsYqDlhTAkIAyb2ZJWMqfjz+Ekgk7xlbR1WV8Fa5A2oma2x2SjzUPyTQ==, tarball: file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz}
+    version: 0.2.2
 
   '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.1.tgz':
     resolution: {integrity: sha512-1lSQUPujZzrZwxgiOpUF0/GdIEp39IKCxZHw32uAYTMiBEpaxRmUpLLn4F4wwzvgWQejpB9ye0oK4KulByuLyg==, tarball: file:vendor/dsh-ops-release-contract-0.1.1.tgz}
@@ -675,7 +675,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@dsh-ops/expert-distribution-contract@file:vendor/dsh-ops-expert-distribution-contract-0.2.0-ca918a026d2b.tgz':
+  '@dsh-ops/expert-distribution-contract@file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz':
     dependencies:
       zod: 4.4.3
 
