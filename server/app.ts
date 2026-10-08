@@ -39,7 +39,8 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
       if (url.pathname === '/health') { json(req, res, 200, { status: 'ok' }); return }
       if (url.pathname === '/api/releases/check') {
         const query = CheckQuerySchema.safeParse(Object.fromEntries(url.searchParams))
-        if (!query.success || Array.from(url.searchParams.keys()).length !== 3) { json(req, res, 400, { error: 'INVALID_UPDATE_QUERY' }); return }
+        const keys = Array.from(url.searchParams.keys())
+        if (!query.success || new Set(keys).size !== keys.length) { json(req, res, 400, { error: 'INVALID_UPDATE_QUERY' }); return }
         const catalog = await readCatalog(config.releaseDirectory)
         json(req, res, 200, decideUpdate(catalog, query.data, config.websiteUrl, options.now?.()))
         return

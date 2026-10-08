@@ -12,8 +12,8 @@ importers:
         specifier: file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz
         version: file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz
       '@dsh-ops/release-contract':
-        specifier: file:vendor/dsh-ops-release-contract-0.1.1.tgz
-        version: file:vendor/dsh-ops-release-contract-0.1.1.tgz
+        specifier: file:vendor/dsh-ops-release-contract-0.1.3.tgz
+        version: file:vendor/dsh-ops-release-contract-0.1.3.tgz
       '@dsh-ops/tracking':
         specifier: file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz
         version: file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz
@@ -78,9 +78,9 @@ packages:
     resolution: {integrity: sha512-51qA441VFsBBwK+j7YBZmksHQTWY9eIsYqDlhTAkIAyb2ZJWMqfjz+Ekgk7xlbR1WV8Fa5A2oma2x2SjzUPyTQ==, tarball: file:vendor/dsh-ops-expert-distribution-contract-0.2.2-eb571c3166d5.tgz}
     version: 0.2.2
 
-  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.1.tgz':
-    resolution: {integrity: sha512-1lSQUPujZzrZwxgiOpUF0/GdIEp39IKCxZHw32uAYTMiBEpaxRmUpLLn4F4wwzvgWQejpB9ye0oK4KulByuLyg==, tarball: file:vendor/dsh-ops-release-contract-0.1.1.tgz}
-    version: 0.1.1
+  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.3.tgz':
+    resolution: {integrity: sha512-VbY4EIZ0x+rZeyIpOeO/Siq0BpJtdP4yi3r9xBN+SpAcEvw6RtjOoIrLwqaC9x2FqAk391AInW+ksR66FegKlw==, tarball: file:vendor/dsh-ops-release-contract-0.1.3.tgz}
+    version: 0.1.3
 
   '@dsh-ops/tracking@file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz':
     resolution: {integrity: sha512-lrLOnvYraA/zXOBVNOV6oak4W0vJtZjF/ULrWyQeK5/eduf0Cb/3CYdErnra2UbnP3dSpeggeZ023Nb1XMqREQ==, tarball: file:vendor/dsh-ops-tracking-0.1.0-09e9c3671ab4.tgz}
@@ -679,7 +679,7 @@ snapshots:
     dependencies:
       zod: 4.4.3
 
-  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.1.tgz':
+  '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.3.tgz':
     dependencies:
       semver: 7.8.5
       zod: 4.4.3

@@ -1,6 +1,8 @@
 # 共享发布协议制品
 
-`dsh-ops-release-contract-0.1.1.tgz` 是产品仓库 `packages/shared/release-contract` 的原始 pnpm pack 产物，统一官网与 Desktop 的显式 HTTP/HTTPS 源地址规则。来源提交、输入哈希与制品 SHA-256 记录在 [release-contract.json](release-contract.json)。源包由产品仓库维护；官网不直接修改制品内的校验器。旧 0.1.0 制品保留用于审计，不再被当前依赖引用。
+`dsh-ops-release-contract-0.1.3.tgz` 是产品仓库 `packages/shared/release-contract` 的原始 pnpm pack 产物，统一官网与 Desktop 的显式 HTTP/HTTPS 源地址和正式版 / Beta / RC 更新规则。请求可带 `channel=stable|beta`，响应与 catalog 仍为 schemaVersion 1；缺参数统一按 stable 处理（仅接收更高正式版），新版测试版频道只接收正式版及首段精确为 beta / rc 的预发布。来源提交、输入哈希与制品 SHA-256 记录在 [release-contract.json](release-contract.json)。源包由产品仓库维护；官网不直接修改制品内的校验器。旧 0.1.0、0.1.1、0.1.2 制品保留用于审计，不再被当前依赖引用。
+
+当前 0.1.3 制品的输入已逐文件核对，与来源清单中 `sourceCommit` 对应的已提交源码一致（`sourceWorkingTree: false`）。
 
 未提交源码的本地联调制品以 `sourceWorkingTree: true` 明确标记，`sourceCommit` 记录基线，`sourceSha256` 固定实际输入；不将基线提交冒充已包含改动的发布提交。正式发布应从审核后的对应源码重新构建并核对输入哈希。
 

@@ -17,11 +17,15 @@ export async function inspectArtifact(file: string) {
 }
 
 export function matchingArtifacts(entries: string[], version: string, platform: ReleasePlatform) {
-  const versionToken = new RegExp(`(?:^|[ _-])${version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[ _-]|\\.(?:exe|zip|dmg|blockmap)$)`)
-  return entries.filter(name => FileNameSchema.safeParse(name).success && versionToken.test(name) &&
-    (platform === 'windows-x64'
-      ? !name.includes('arm64') && (name.endsWith('.exe') || name.endsWith('.zip') && /[ _-]x64\./.test(name))
-      : /\.(zip|dmg|blockmap)$/.test(name) && /[ _-]arm64\./.test(name)))
+  const escapedVersion = VersionSchema.parse(version).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // Match the complete version followed only by actual builder suffixes. A
+  // generic hyphen boundary would also match 0.3.0 against 0.3.0-beta.1.
+  const suffix = platform === 'windows-x64'
+    ? '(?:[ _-]x64)?\\.exe|(?:[ _-]portable)?[ _-]x64\\.zip'
+    : '[ _-]arm64\\.(?:(?:zip|dmg)(?:\\.blockmap)?|blockmap)'
+  const artifactName = new RegExp(`(?:^|[ _-])${escapedVersion}(?:${suffix})$`)
+  return entries.filter(name => FileNameSchema.safeParse(name).success && artifactName.test(name) &&
+    (platform !== 'windows-x64' || !name.includes('arm64')))
 }
 
 export async function publishRelease(options: {
