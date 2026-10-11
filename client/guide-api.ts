@@ -53,7 +53,7 @@ export async function guideApi<T>(url: string, options: { method?: string; data?
 }
 export const requestMessage = (error: unknown) => error instanceof ApiError ? error.message : '连接未完成，请检查网络后重试。'
 
-export function uploadFile<T>(url: string, file: File, options: { csrf: string; revision?: string; signal: AbortSignal; progress: (percent: number) => void }): Promise<T> {
+export function uploadFile<T>(url: string, file: File, options: { csrf: string; revision?: string; headers?: Record<string, string>; signal: AbortSignal; progress: (percent: number) => void }): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     const abort = () => xhr.abort()
@@ -61,6 +61,7 @@ export function uploadFile<T>(url: string, file: File, options: { csrf: string; 
     xhr.open('POST', url); xhr.timeout = 30 * 60 * 1000; xhr.withCredentials = true
     xhr.setRequestHeader('Content-Type', 'application/octet-stream'); xhr.setRequestHeader('X-CSRF-Token', options.csrf)
     if (options.revision) xhr.setRequestHeader('X-Revision', options.revision)
+    for (const [name, value] of Object.entries(options.headers ?? {})) xhr.setRequestHeader(name, value)
     xhr.upload.onprogress = e => { if (e.lengthComputable) options.progress(Math.round(e.loaded / e.total * 100)) }
     xhr.onload = () => { try { const data = JSON.parse(xhr.responseText); xhr.status >= 200 && xhr.status < 300 ? finish(undefined, data) : finish(new ApiError(data.error, issuesOf(data.issues))) } catch { finish(new Error('Invalid response')) } }
     xhr.onerror = xhr.ontimeout = () => finish(new Error('Upload failed'))

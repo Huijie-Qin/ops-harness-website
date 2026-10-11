@@ -15,6 +15,8 @@ import { createGuideHandler } from './guide-http.js'
 import { TrackingStore } from './tracking/store.js'
 import { createTrackingHandlers } from './tracking/http.js'
 import { ContentSync } from './content-sync.js'
+import { VideoStore } from './videos-store.js'
+import { createVideoHandler } from './videos-http.js'
 
 const config = await loadConfig()
 const dev = process.argv.includes('--dev')
@@ -27,14 +29,16 @@ const guides = new GuideStore(path.join(seedContent, 'guide'), config.contentDir
 const sync = new ContentSync(guides, media, path.resolve('content'))
 const knowledge = new KnowledgeStore(config.contentDirectory)
 const experts = new ExpertStore(config.contentDirectory, knowledge)
+const videos = new VideoStore(config.contentDirectory)
+const videoApi = createVideoHandler(videos)
 const analytics = new TrackingStore(config.analyticsDirectory)
 const tracking = createTrackingHandlers(analytics, { enabled: config.trackingEnabled, defaultEnvironment: dev ? 'development' : 'production' })
-const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge, experts)
+const contentAdmin = createAdminHandler(new ReleaseAdmin(config.releaseDirectory), media, sync, knowledge, experts, videos)
 const maintenance = setInterval(() => void analytics.maintain().catch(() => {}), 3600000)
 maintenance.unref()
 await analytics.maintain()
 const guideApi = await createGuideHandler(guides, { origin: config.websiteUrl, password, admin: async (...args) => await tracking.admin(...args) || await contentAdmin(...args) })
-const guide: typeof guideApi = async (req, res, url) => await tracking.collect(req, res, url) || await media.serve(req, res, url) || await guideApi(req, res, url)
+const guide: typeof guideApi = async (req, res, url) => await tracking.collect(req, res, url) || await videoApi(req, res, url) || await media.serve(req, res, url) || await guideApi(req, res, url)
 const server = createServer()
 const vite = dev ? await (await import('vite')).createServer({
   server: { middlewareMode: true, hmr: { server } }, appType: 'spa',

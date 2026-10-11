@@ -109,7 +109,7 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
       }
       const editorStyle = url.pathname === '/admin' ? " 'unsafe-inline'" : ''
       const editorScript = url.pathname === '/admin' && options.adminIconHash ? ` 'sha256-${options.adminIconHash}'` : ''
-      res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'${editorScript}; style-src 'self'${editorStyle}; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'`)
+      res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'${editorScript}; style-src 'self'${editorStyle}; img-src 'self' data:; media-src 'self'${url.pathname === '/admin' ? ' blob:' : ''}; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'`)
       const page = ['/', '/guide', '/admin', '/releases'].includes(url.pathname)
       const segments = page ? ['index.html'] : url.pathname.slice(1).split('/').map(decodeURIComponent)
       const ext = path.extname(segments.at(-1) ?? '')
