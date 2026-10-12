@@ -30,14 +30,15 @@ pnpm start
 
 ## 首页与使用指南
 
-- `client/HeroAtmosphere.vue`：参考 [DeepSeek Harness 官网](https://www.deepseek.com/harness/) 的蓝色光场与点阵空间感，自行实现 Canvas 动画。鼠标移动带动柔光、扩散涟漪与点阵视差/避让；支持暂停、系统减少动态效果偏好，以及离开可见区域/后台时停止刷新；不加载外部动画脚本。
+- `client/CinemaHero.vue` / `VideoDialog.vue`：首页使用电影感产品封面，点击“观看产品影片”后在弹窗播放管理员发布的首页主片。支持原生播放控件、加载重试、Escape / 点击遮罩关闭、焦点恢复与窄屏布局；打开弹窗前不加载视频。无主片时提供使用指南入口。封面 `cinema-hero.webp` 是根据已确认视觉稿制作的宣传美术图，不作为真实产品界面验收截图。
+- `client/CinemaAtmosphere.vue`：暗部光尘缓慢漂浮，响应鼠标的局部避让、柔光和主图微视差；文字及操作位置保持固定。底栏提供暂停按钮；打开影片、滚动离屏或切至后台时停止绘制。窄屏、粗指针及系统减少动态效果时使用静态效果；绘制上限 30 fps、DPR 上限 1.5，不引入动画依赖。
 - `client/WorkspacePreview.vue` / `ProductShot.vue`：首页仅展示“目标 · 待办”，以今日重点、日程、邮件和行动建议为介绍重点，支持查看原图。展示图保存在 `public/assets/product/`，由开发与生产服务统一提供 `/assets/product/` 路径。工具市场、我的技能、我的专家暂不在首页介绍，其既有指南内容与配图保留。
 - `content/guide/*.md`：11 个独立 Markdown 章节，包含操作步骤、完成标志、示例与常见问题。更新功能时同步核对对应插件 README 和实际界面，不能将待接入能力描述为已经可用。
 - `client/GuidePage.vue`：全文搜索、分组目录、前后章导航和示例复制。支持章节链接及原有 `#step-1` 至 `#step-4` 链接。
 
 ### 管理员与 Markdown 维护
 
-管理员入口为 `/admin`。包含“文档编辑、目录与文档管理、发布包、图片库”四个区域。文档编辑页只编辑 Markdown 正文，提供文档选择、预览和正文历史恢复。目录与文档管理页以分组列表集中处理新建、名称与简介、移动、排序、隐藏及回收恢复，操作按钮直接显示。旧 `/guide/admin` 地址自动跳转到 `/admin`。完整操作、内容格式、部署凭据与备份方式见 [帮助文档维护手册](docs/runbooks/website-guide-maintenance.md)。选型比较见 [ADR 0012](docs/adr/0012-markdown-guide-administration.md)。
+管理员入口为 `/admin`。包含文档编辑、目录与文档管理、发布包、图片库、知识库、专家与新增的“视频内容”区域。视频内容支持产品宣传、特性使用、最佳实践分类，以及 MP4 上传、封面、预览、发布和设为首页主片；草稿视频只对管理员开放。文档编辑页只编辑 Markdown 正文，提供文档选择、预览和正文历史恢复。目录与文档管理页以分组列表集中处理新建、名称与简介、移动、排序、隐藏及回收恢复，操作按钮直接显示。旧 `/guide/admin` 地址自动跳转到 `/admin`。完整操作、内容格式、部署凭据与备份方式见 [帮助文档维护手册](docs/runbooks/website-guide-maintenance.md)。选型比较见 [ADR 0012](docs/adr/0012-markdown-guide-administration.md)，视频存储与发布边界见 [ADR 0025](docs/adr/0025-video-content.md)。
 
 `client/GuideAdmin.vue` / `MarkdownEditor.vue` 提供管理员登录、Vditor 编辑、阅读预览、版本历史与回收站。管理员密码通过环境提供，没有默认密码；未配置时编辑接口关闭，公开阅读不受影响。日常保存发布到 `.runtime/website-content`。管理员可明确点击“同步到 content”，核对清单后将修改过的文档、目录和图片写回源码，以便检查并提交到主仓；不会自动执行 Git 操作。
 
@@ -130,6 +131,12 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | GET/PUT /api/admin/navigation | 分组、章节顺序与隐藏配置 |
 | GET/POST /api/admin/images | 图片库及原始二进制上传（name 查询参数） |
 | GET/HEAD /media/:sha256.:ext | 受控图片公开读取 |
+| GET /api/videos | 已发布的视频目录 |
+| GET/HEAD /videos/:sha256.mp4 | 已发布视频流，支持 Range |
+| GET/POST /api/admin/videos | 视频目录 / 新建草稿 |
+| PUT/DELETE /api/admin/videos/:id | 更新、发布、下架、设为主片 / 移入回收目录，需 revision |
+| POST /api/admin/videos/:id/file?name=... | MP4 上传，最多 512 MiB，需 X-Revision；仅草稿可替换文件 |
+| GET/HEAD /api/admin/videos/:id/preview | 已登录管理员预览草稿或已发布视频 |
 | POST /api/admin/releases/manifest | 校验打包描述文件并预览版本、平台和文件清单（不创建草稿） |
 | GET/POST /api/admin/releases | 发布清单 / 用描述文件和更新说明新建草稿 |
 | PUT /api/admin/releases/drafts/:id/manifest | 为旧草稿补充描述文件并校验已有文件，需 revision |

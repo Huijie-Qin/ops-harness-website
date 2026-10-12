@@ -113,7 +113,7 @@ export async function createGuideHandler(store: GuideStore, options: { origin: s
       }
       const current = session(req)
       if (!current) throw new GuideError('AUTH_REQUIRED', 401)
-      if (req.method !== 'GET') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
         checkOrigin(req)
         if (!equal(String(req.headers['x-csrf-token'] ?? ''), current.csrf)) throw new GuideError('CSRF_REJECTED', 403)
       }

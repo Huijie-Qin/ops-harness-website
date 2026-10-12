@@ -9,3 +9,11 @@ public/assets/vendor/
 *.log
 .DS_Store
 .idea/
+
+# Video content is uploaded through admin and stored outside source control.
+*.mp4
+*.mov
+*.m4v
+*.webm
+*.mkv
+*.avi
