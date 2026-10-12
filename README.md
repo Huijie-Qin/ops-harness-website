@@ -239,6 +239,8 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 外层字段名沿用 snake_case。`knowledge_retrieve_workflow_id` 是名称到工作流 ID 的映射，允许空对象，最多 50 项；新增或改名的 key 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，拒绝 `run_code`、`__proto__`、`constructor`、`prototype`；value 最多 256 字符。名称和值去除首尾空白后不能为空，名称不能重复。历史已存名称仍可读取和原名保存，管理页提示无效方法名，不自动改名。客户端以 key 注册方法，以 value 调用工作流。
 
+`data_query_workflows` 是可选的字符串数组，列出被标注为“数据查询”的方法 key，表示该方法的结果是可以画成图表的数据；管理页每个工作流行有对应勾选。只接受同一条目 `knowledge_retrieve_workflow_id` 中存在且不重复的名称，保存时按工作流映射的顺序整理，为空则不出现该字段。新建省略视为没有标注；更新省略保留原标注（仅保留仍存在的方法，改名或移除方法时标注随之消失），显式 `[]` 清空。历史方法 `query_card_data` 不需要标注，客户端始终把它当作数据查询。该字段只在 v2 公开目录中输出，v1 投影显式剔除，旧客户端收到的字节与 ETag 不变；已安装的新客户端在用户同步该知识库后采用修改。
+
 `skill_name` 只能为已上传技能的一个名称或 `null`。新建省略时使用 `null`，更新省略时保留引用，显式 `null` 解除引用。其余长度上限：`tenant_name` 80、`tenant_id` 128、各 knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)。
 
 原地址 `GET /api/knowledge/metrics` 始终返回 `schemaVersion: 1`，从同一份当前配置投影：只包含已上架、引用 `legacy_skill_name`（双方均无技能也允许）且三个固定工作流完整的知识库；新建且满足条件的库同样可见。每个条目移除单技能引用字段，仅保留 `get_card_index`、`get_card_meta`、`query_card_data` 并附同值 `quer_card_data` 别名；顶层 `skill` 为原公共技能的当前元数据。其他技能或自定义工作流库只供新版。迁移时旧拼写转为标准拼写，但两者同时存在且值不同时完整保留、管理页提示且不进入 v1；v2 不改写自定义 key。

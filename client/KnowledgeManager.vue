@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import type { MetricKnowledgeCatalog, MetricKnowledgeEntry, MetricKnowledgeSkill } from '../shared/knowledge'
-import { maxKnowledgeSkills, maxKnowledgeWorkflows, maxSkillFileBytes, maxTypicalIndicators, maxWorkflowName, maxWorkflowValue, metricKnowledgeIdPattern, validWorkflowName, legacyKnowledgeCompatible } from '../shared/knowledge'
+import { legacyDataQueryWorkflow, maxKnowledgeSkills, maxKnowledgeWorkflows, maxSkillFileBytes, maxTypicalIndicators, maxWorkflowName, maxWorkflowValue, metricKnowledgeIdPattern, validWorkflowName, legacyKnowledgeCompatible } from '../shared/knowledge'
 import { ApiError, guideApi, requestMessage, uploadFile } from './guide-api'
 import WebsiteDialog from './WebsiteDialog.vue'
 
-type WorkflowRow = { id: number; name: string; value: string }
+type WorkflowRow = { id: number; name: string; value: string; dataQuery: boolean }
 type UploadResult = { file: string; status: 'saved' | 'failed' | 'cancelled' | 'skipped'; message: string }
 let workflowSequence = 0
-const workflowRow = (name = '', value = ''): WorkflowRow => ({ id: ++workflowSequence, name, value })
+const workflowRow = (name = '', value = '', dataQuery = false): WorkflowRow => ({ id: ++workflowSequence, name, value, dataQuery })
+// The historical data method needs no annotation: clients already treat it as a data query.
+const isLegacyDataQuery = (row: WorkflowRow) => row.name.trim() === legacyDataQueryWorkflow
 type Form = {
   id: string; tenant_name: string; tenant_id: string
   workflows: WorkflowRow[]; skill_name: string | null | undefined
@@ -17,7 +19,7 @@ type Form = {
   typical_indicators: string; enabled: boolean
 }
 const empty = (): Form => ({
-  id: '', tenant_name: '', tenant_id: '', workflows: ['get_card_index', 'get_card_meta', 'query_card_data'].map(name => workflowRow(name)), skill_name: null,
+  id: '', tenant_name: '', tenant_id: '', workflows: ['get_card_index', 'get_card_meta', 'query_card_data'].map(name => workflowRow(name, '', name === legacyDataQueryWorkflow)), skill_name: null,
   card_index_knowledge_base: '', card_meta_knowledge_base: '', knowledge_description: '',
   indicators_cover: '', reports_cover: '', update_frequency: '', typical_indicators: '', enabled: true,
 })
@@ -58,7 +60,9 @@ function adopt(entry: MetricKnowledgeEntry) {
   const meta = entry.knowledge_base_meta
   form.value = {
     id: entry.id, tenant_name: entry.tenant_name, tenant_id: entry.tenant_id,
-    workflows: Object.entries(entry.knowledge_retrieve_workflow_id).map(([name, value]) => workflowRow(name, value)),
+    // The historical data method stays ticked, so renaming it keeps it a data query instead of dropping the role.
+    workflows: Object.entries(entry.knowledge_retrieve_workflow_id).map(([name, value]) =>
+      workflowRow(name, value, entry.data_query_workflows?.includes(name) === true || name === legacyDataQueryWorkflow)),
     skill_name: entry.pending_skill_names?.length ? undefined : entry.skill_name,
     card_index_knowledge_base: entry.knowledge_id.card_index_knowledge_base,
     card_meta_knowledge_base: entry.knowledge_id.card_meta_knowledge_base,
@@ -119,6 +123,8 @@ function payload() {
     ...(creating.value && value.id.trim() ? { id: value.id.trim() } : {}),
     tenant_name: value.tenant_name.trim(), tenant_id: value.tenant_id.trim(),
     knowledge_retrieve_workflow_id: Object.fromEntries(value.workflows.map(row => [row.name.trim(), row.value.trim()])),
+    // Always sent, so clearing the last tick is a real change rather than "field omitted, keep what was there".
+    data_query_workflows: value.workflows.filter(row => row.dataQuery && !isLegacyDataQuery(row)).map(row => row.name.trim()),
     skill_name: value.skill_name,
     knowledge_id: { card_index_knowledge_base: value.card_index_knowledge_base.trim(), card_meta_knowledge_base: value.card_meta_knowledge_base.trim() },
     knowledge_base_meta: meta, enabled: value.enabled,
@@ -303,11 +309,13 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
             <section class="knowledge-field-section" aria-labelledby="knowledge-workflows-heading">
               <div class="knowledge-field-heading"><h4 id="knowledge-workflows-heading">检索工作流</h4><span>{{ form.workflows.length }} / {{ maxKnowledgeWorkflows }}</span></div>
               <p id="knowledge-workflows-help" class="editor-help">按名称和值成对填写。名称对应客户端方法，使用 1–64 位字母、数字、下划线或连字符且不能重复，值填写对应的工作流 ID；不需要的项目可移除，也可不配置工作流。</p>
+              <p id="knowledge-data-query-help" class="editor-help">勾选“数据查询”的方法，返回的表格数据会由办公助手直接画成图表：只勾选真正返回数据的方法，目录检索、口径检索不要勾选。历史方法 {{ legacyDataQueryWorkflow }} 默认就是数据查询。已安装的客户端在用户同步该知识库后采用修改。</p>
               <p v-if="invalidHistoricalNames.length" class="admin-error">历史工作流名称需要调整后才能作为新版客户端方法使用：{{ invalidHistoricalNames.join('、') }}。未修改的历史名称会保留。</p>
               <p v-if="conflictingAlias" class="admin-error">query_card_data 与 quer_card_data 的值不同，请核对；当前配置仅提供给新版客户端。</p>
               <div v-for="(row, index) in form.workflows" :key="row.id" class="workflow-row">
                 <label>名称（key）<input :ref="element => setWorkflowInput(row.id, element)" v-model="row.name" required :maxlength="maxWorkflowName" :aria-label="`工作流 ${index + 1} 名称（key）`" aria-describedby="knowledge-workflows-help" placeholder="例如：get_card_index" /></label>
                 <label>值（value）<input v-model="row.value" required :maxlength="maxWorkflowValue" :aria-label="`工作流 ${index + 1} 值（value）`" placeholder="填写工作流 ID" /></label>
+                <label class="check-label workflow-role"><input type="checkbox" :checked="row.dataQuery || isLegacyDataQuery(row)" :disabled="isLegacyDataQuery(row)" :aria-label="`工作流 ${index + 1}${row.name ? `：${row.name}` : ''} 标注为数据查询`" aria-describedby="knowledge-data-query-help" @change="row.dataQuery = ($event.target as HTMLInputElement).checked" />数据查询</label>
                 <button type="button" class="button secondary" :aria-label="`移除工作流 ${index + 1}${row.name ? `：${row.name}` : ''}`" @click="removeWorkflow(row.id)">移除</button>
               </div>
               <p v-if="!form.workflows.length" class="editor-help">尚未配置检索工作流。</p>
@@ -338,6 +346,6 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
 </template>
 
 <style scoped>
-.legacy-choice{margin:16px 24px;padding:16px;border:1px solid var(--border-default);border-radius:8px}.shared-skill{border-top:0;padding-top:0;margin-top:0;margin-bottom:24px}.shared-skill h3 small{font-size:12px;font-weight:400;color:var(--text-tertiary);margin-left:8px}.shared-skill>.editor-help{margin-left:24px;margin-right:24px}.knowledge-skill{margin:0 24px;align-items:flex-start}.knowledge-skill small,.knowledge-skill .editor-help{overflow-wrap:anywhere}.knowledge-skill>.skill-actions{flex:0 0 auto;padding-top:2px}.skill-actions a{color:var(--accent-primary)}.skill-actions button{font:inherit}.upload-results{list-style:none;margin:16px 24px;padding:12px 16px;border:1px solid var(--border-default);border-radius:8px;max-height:260px;overflow:auto;font-size:12px}.upload-results li{display:grid;gap:4px;padding:6px 0;overflow-wrap:anywhere}.upload-results span{color:#34705c;font-size:11px;line-height:1.7}.upload-results .upload-failed span{color:#973d3d}.knowledge-field-section{margin-top:24px;padding-top:20px;border-top:1px solid var(--border-default)}.knowledge-field-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.knowledge-field-heading h4{margin:0;font-size:14px}.knowledge-field-heading>span{font-size:11px;color:var(--text-tertiary)}.workflow-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;align-items:end;gap:12px;margin-top:16px}.workflow-row label{display:grid;gap:8px;min-width:0;font-size:12px}.workflow-row input{min-width:0}.add-workflow{margin-top:16px}.guide-admin .skill-choices{margin-top:24px;padding-top:12px}.skill-choices legend{font-size:14px;font-weight:650;padding:0}.skill-choices>.editor-help{margin-top:0}.skill-choice-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}.guide-admin .skill-choice-list .check-label{align-items:flex-start;white-space:normal;border:1px solid var(--border-default);padding:12px;border-radius:6px}.skill-choice-list input{margin-top:2px}.skill-choice-list span{min-width:0;overflow-wrap:anywhere}.skill-choice-list strong{font-weight:500}.skill-choice-list small{display:block;font-size:11px;color:var(--text-tertiary);margin-top:4px}.guide-admin .knowledge-enabled{white-space:normal;align-items:flex-start}.knowledge-enabled input{flex-shrink:0}
-@media(max-width:760px){.shared-skill>.editor-help{margin-left:18px;margin-right:18px}.knowledge-skill{margin-left:18px;margin-right:18px;flex-wrap:wrap}.knowledge-skill>div:first-child{flex-basis:100%}.upload-results{margin-left:18px;margin-right:18px}.workflow-row{grid-template-columns:minmax(0,1fr);padding-bottom:16px;border-bottom:1px solid var(--border-subtle)}.workflow-row button{justify-self:start}.skill-choice-list{grid-template-columns:1fr}}
+.legacy-choice{margin:16px 24px;padding:16px;border:1px solid var(--border-default);border-radius:8px}.shared-skill{border-top:0;padding-top:0;margin-top:0;margin-bottom:24px}.shared-skill h3 small{font-size:12px;font-weight:400;color:var(--text-tertiary);margin-left:8px}.shared-skill>.editor-help{margin-left:24px;margin-right:24px}.knowledge-skill{margin:0 24px;align-items:flex-start}.knowledge-skill small,.knowledge-skill .editor-help{overflow-wrap:anywhere}.knowledge-skill>.skill-actions{flex:0 0 auto;padding-top:2px}.skill-actions a{color:var(--accent-primary)}.skill-actions button{font:inherit}.upload-results{list-style:none;margin:16px 24px;padding:12px 16px;border:1px solid var(--border-default);border-radius:8px;max-height:260px;overflow:auto;font-size:12px}.upload-results li{display:grid;gap:4px;padding:6px 0;overflow-wrap:anywhere}.upload-results span{color:#34705c;font-size:11px;line-height:1.7}.upload-results .upload-failed span{color:#973d3d}.knowledge-field-section{margin-top:24px;padding-top:20px;border-top:1px solid var(--border-default)}.knowledge-field-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.knowledge-field-heading h4{margin:0;font-size:14px}.knowledge-field-heading>span{font-size:11px;color:var(--text-tertiary)}.workflow-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto auto;align-items:end;gap:12px;margin-top:16px}.workflow-row label{display:grid;gap:8px;min-width:0;font-size:12px}.workflow-row input{min-width:0}.guide-admin .workflow-row .workflow-role{display:flex;align-items:center;min-height:40px}.add-workflow{margin-top:16px}.guide-admin .skill-choices{margin-top:24px;padding-top:12px}.skill-choices legend{font-size:14px;font-weight:650;padding:0}.skill-choices>.editor-help{margin-top:0}.skill-choice-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}.guide-admin .skill-choice-list .check-label{align-items:flex-start;white-space:normal;border:1px solid var(--border-default);padding:12px;border-radius:6px}.skill-choice-list input{margin-top:2px}.skill-choice-list span{min-width:0;overflow-wrap:anywhere}.skill-choice-list strong{font-weight:500}.skill-choice-list small{display:block;font-size:11px;color:var(--text-tertiary);margin-top:4px}.guide-admin .knowledge-enabled{white-space:normal;align-items:flex-start}.knowledge-enabled input{flex-shrink:0}
+@media(max-width:760px){.shared-skill>.editor-help{margin-left:18px;margin-right:18px}.knowledge-skill{margin-left:18px;margin-right:18px;flex-wrap:wrap}.knowledge-skill>div:first-child{flex-basis:100%}.upload-results{margin-left:18px;margin-right:18px}.workflow-row{grid-template-columns:minmax(0,1fr);padding-bottom:16px;border-bottom:1px solid var(--border-subtle)}.workflow-row button{justify-self:start}.guide-admin .workflow-row .workflow-role{min-height:0}.skill-choice-list{grid-template-columns:1fr}}
 </style>
