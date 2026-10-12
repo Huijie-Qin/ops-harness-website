@@ -44,20 +44,26 @@ const SkillSchema = z.object({
 const IdSchema = z.string().max(maxKnowledgeId).regex(metricKnowledgeIdPattern)
 const SkillNameSchema = z.string().max(maxSkillName).regex(skillNamePattern)
 const SkillNamesSchema = z.array(SkillNameSchema).max(maxKnowledgeSkills).refine(names => new Set(names).size === names.length)
+// Names of methods in the same entry's workflow map; their existence is checked where the map is known.
+const DataQuerySchema = z.array(text(maxWorkflowName)).max(maxKnowledgeWorkflows)
 const InputSchema = z.object({
   id: IdSchema.optional(), tenant_name: text(80), tenant_id: text(128),
   knowledge_retrieve_workflow_id: WorkflowSchema, knowledge_id: KnowledgeIdSchema, knowledge_base_meta: MetaSchema,
-  enabled: z.boolean(), skill_name: SkillNameSchema.nullable().optional(),
+  enabled: z.boolean(), skill_name: SkillNameSchema.nullable().optional(), data_query_workflows: DataQuerySchema.optional(),
 }).strict()
 const EntrySchema = InputSchema.extend({
   id: IdSchema, skill_name: SkillNameSchema.nullable(), pending_skill_names: SkillNamesSchema.min(2).optional(), created_at: z.string().datetime(), updated_at: z.string().datetime(),
 }).strict()
 const DocumentSchema = z.object({ schemaVersion: z.literal(2), updatedAt: z.string().datetime(), skills: z.array(SkillSchema).max(maxKnowledgeSkills), legacy_skill_name: SkillNameSchema.nullable().optional(), items: z.array(EntrySchema).max(maxKnowledgeEntries) }).strict().superRefine((document, ctx) => {
   const skillNames = new Set(document.skills.map(skill => skill.name))
+  const danglingDataQuery = (item: { data_query_workflows?: string[] | undefined; knowledge_retrieve_workflow_id: Record<string, string> }) => item.data_query_workflows !== undefined &&
+    (new Set(item.data_query_workflows).size !== item.data_query_workflows.length ||
+      item.data_query_workflows.some(name => !Object.hasOwn(item.knowledge_retrieve_workflow_id, name)))
   if (skillNames.size !== document.skills.length || new Set(document.items.map(item => item.id)).size !== document.items.length ||
       new Set(document.items.map(item => item.tenant_id)).size !== document.items.length || document.items.some(item => (item.skill_name !== null && !skillNames.has(item.skill_name)) || item.pending_skill_names?.some(name => !skillNames.has(name))) ||
+      document.items.some(danglingDataQuery) ||
       (typeof document.legacy_skill_name === 'string' && !skillNames.has(document.legacy_skill_name))) {
-    ctx.addIssue({ code: 'custom', message: 'Duplicate identity or invalid skill reference' })
+    ctx.addIssue({ code: 'custom', message: 'Duplicate identity or invalid reference' })
   }
 })
 const LegacyDocumentSchema = z.object({ schemaVersion: z.literal(1), updatedAt: z.string().datetime(), skill: SkillSchema.optional(),
@@ -98,6 +104,32 @@ function parse<T>(schema: z.ZodType<T>, input: unknown, code = 'INVALID_KNOWLEDG
 // The stored document never contains its own hash; `revision` is derived from the normalized bytes.
 const revisionOfDocument = (document: CatalogDocument) => revisionOf(JSON.stringify(document))
 const emptyDocument: CatalogDocument = { schemaVersion: 2, updatedAt: new Date(0).toISOString(), skills: [], items: [], legacy_skill_name: null }
+
+/**
+ * The tags follow the method map: only names that exist, each once, in the map's own order, and no key at all when
+ * none is left. The order never depends on how the editor listed them, so the revision only moves on a real change.
+ */
+function dataQueryOf(workflows: Record<string, string>, tags: readonly string[] | undefined): { data_query_workflows?: string[] } {
+  if (tags === undefined || tags.length === 0) return {}
+  const wanted = new Set(tags)
+  const names = Object.keys(workflows).filter(name => wanted.has(name))
+  return names.length === 0 ? {} : { data_query_workflows: names }
+}
+
+/**
+ * A stored mark that names no method of its entry, or repeats one, is only a hint that went stale (a hand edit, an
+ * older bug): drop it on read instead of failing the whole catalog for every library. The file is not touched; the
+ * next write persists the cleaned list. Anything that is not a list stays for the schema to refuse.
+ */
+function healDataQuery(item: Record<string, unknown>): Record<string, unknown> {
+  const marks = item.data_query_workflows
+  const workflows = item.knowledge_retrieve_workflow_id
+  if (!Array.isArray(marks) || typeof workflows !== 'object' || workflows === null || Array.isArray(workflows)) return item
+  const kept = Object.keys(workflows).filter(name => marks.includes(name))
+  if (kept.length === marks.length && kept.every((name, index) => marks[index] === name)) return item
+  const { data_query_workflows: _dropped, ...rest } = item
+  return kept.length === 0 ? rest : { ...rest, data_query_workflows: kept }
+}
 
 export function parseSkillFrontmatter(bytes: Buffer): { name: string; description: string } {
   if (bytes.length > maxSkillFileBytes) return fail('INVALID_SKILL_FILE')
@@ -234,8 +266,9 @@ export class KnowledgeStore {
     } else {
       const record = raw as Record<string, unknown>
       if (!Array.isArray(record.items)) return fail('CONTENT_UNAVAILABLE', 503)
-      const items = record.items.map((item: Record<string, unknown>) => {
-        if (typeof item !== 'object' || item === null || Array.isArray(item)) return fail('CONTENT_UNAVAILABLE', 503)
+      const items = record.items.map((stored: Record<string, unknown>) => {
+        if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) return fail('CONTENT_UNAVAILABLE', 503)
+        const item = healDataQuery(stored)
         if (!Object.hasOwn(item, 'skill_names')) return item
         migrated = true
         if (Object.hasOwn(item, 'skill_name')) return fail('CONTENT_UNAVAILABLE', 503)
@@ -320,7 +353,9 @@ export class KnowledgeStore {
   private projectLegacy(catalog: CatalogDocument) {
     if (catalog.legacy_skill_name === undefined) return fail('LEGACY_SKILL_UNRESOLVED', 503)
     const skill = catalog.skills.find(skill => skill.name === catalog.legacy_skill_name)
-    const items = catalog.items.filter(item => item.enabled && legacyKnowledgeCompatible(item, catalog.legacy_skill_name)).map(({ skill_name: _skill, pending_skill_names: _pending, ...item }) => {
+    // Released clients get exactly the fields they were built for: no field added later reaches this response, so
+    // its bytes and ETag depend only on what those clients can read.
+    const items = catalog.items.filter(item => item.enabled && legacyKnowledgeCompatible(item, catalog.legacy_skill_name)).map(({ skill_name: _skill, pending_skill_names: _pending, data_query_workflows: _dataQuery, ...item }) => {
       const values = item.knowledge_retrieve_workflow_id
       return { ...item, knowledge_retrieve_workflow_id: { get_card_index: values.get_card_index!, get_card_meta: values.get_card_meta!, query_card_data: values.query_card_data!, quer_card_data: values.query_card_data! } }
     })
@@ -342,11 +377,15 @@ export class KnowledgeStore {
   private validateWorkflowNames(workflows: Record<string, string>, previous: Record<string, string> = {}) {
     for (const name of Object.keys(workflows)) if (!validWorkflowName(name) && !Object.hasOwn(previous, name)) return fail('INVALID_WORKFLOW_NAME')
   }
+  /** A tag names a method of the same entry, once; anything else is a mistake of the editor, not something to guess at. */
+  private validateDataQuery(workflows: Record<string, string>, tags: readonly string[] | undefined) {
+    if (tags !== undefined && (new Set(tags).size !== tags.length || tags.some(name => !Object.hasOwn(workflows, name)))) return fail('INVALID_DATA_QUERY_WORKFLOW')
+  }
   async create(input: unknown, expected: unknown) {
     const value: KnowledgeInput = parse(InputSchema, input)
     return this.change(expected, async current => {
       if (current.items.length >= maxKnowledgeEntries) return fail('KNOWLEDGE_LIMIT', 409)
-      const { id: requested, ...rest } = value
+      const { id: requested, data_query_workflows: tags, ...rest } = value
       let id = requested
       if (!id) do { id = `metrics-${randomBytes(5).toString('hex')}` } while (current.items.some(item => item.id === id))
       if (current.items.some(item => item.id === id)) return fail('KNOWLEDGE_ID_TAKEN', 409)
@@ -354,8 +393,9 @@ export class KnowledgeStore {
       const skill_name = value.skill_name ?? null
       this.validateReferences(current, skill_name === null ? [] : [skill_name])
       this.validateWorkflowNames(value.knowledge_retrieve_workflow_id)
+      this.validateDataQuery(value.knowledge_retrieve_workflow_id, tags)
       const now = new Date().toISOString()
-      const document = await this.commit([...current.items, { id, ...rest, skill_name, created_at: now, updated_at: now }], current.skills, current.migrated, current.legacy_skill_name)
+      const document = await this.commit([...current.items, { id, ...rest, skill_name, ...dataQueryOf(value.knowledge_retrieve_workflow_id, tags), created_at: now, updated_at: now }], current.skills, current.migrated, current.legacy_skill_name)
       return { revision: document.revision, updatedAt: document.updatedAt, entry: this.found(document, id) }
     })
   }
@@ -367,12 +407,16 @@ export class KnowledgeStore {
     return this.change(expected, async current => {
       const previous = this.found(current, id)
       if (current.items.some(item => item.id !== id && item.tenant_id === value.tenant_id)) return fail('TENANT_ID_TAKEN', 409)
-      const { id: ignored, ...rest } = value
+      const { id: ignored, data_query_workflows: tags, ...rest } = value
       if (previous.pending_skill_names?.length && value.skill_name === undefined) return fail('SKILL_SELECTION_REQUIRED')
       const skill_name = value.skill_name === undefined ? previous.skill_name : value.skill_name
       this.validateReferences(current, skill_name === null ? [] : [skill_name])
       this.validateWorkflowNames(value.knowledge_retrieve_workflow_id, previous.knowledge_retrieve_workflow_id)
-      return this.replace(current, { id, ...rest, skill_name, created_at: previous.created_at, updated_at: new Date().toISOString() }, true)
+      this.validateDataQuery(value.knowledge_retrieve_workflow_id, tags)
+      // An editor that does not send the field keeps what was tagged, for the methods that still exist; sending an
+      // empty list clears it.
+      const dataQuery = dataQueryOf(value.knowledge_retrieve_workflow_id, tags ?? previous.data_query_workflows)
+      return this.replace(current, { id, ...rest, skill_name, ...dataQuery, created_at: previous.created_at, updated_at: new Date().toISOString() }, true)
     })
   }
   async remove(id: string, expected: unknown) {

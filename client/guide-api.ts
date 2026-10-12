@@ -33,6 +33,7 @@ const messages: Record<string, string> = {
   SKILL_SELECTION_REQUIRED: '请明确选择一个技能或不引用技能。',
   INVALID_WORKFLOW_NAME: '新增或改名的工作流名称只允许 1–64 位字母、数字、下划线或连字符，且不能使用保留名称。',
   INVALID_SKILL_REFERENCE: '所选技能已不存在，请刷新列表后重新选择引用技能。',
+  INVALID_DATA_QUERY_WORKFLOW: '“数据查询”标注必须落在本知识库已配置的工作流上，请刷新页面后重新勾选。',
   SKILL_IN_USE: '该技能仍被知识库引用，请先在相关知识库中取消勾选并保存；已下架的知识库也需要解除引用。',
   EXPERT_SKILL_NOT_FOUND: '草稿里已没有这个技能，请刷新后重试。',
   EXPERT_NOT_FOUND: '专家不存在或已被删除，请刷新列表。', EXPERT_ID_TAKEN: '该专家 ID 已被占用，请换一个。', EXPERT_LIMIT: '专家数量已达到 200 个上限，请先整理。',
