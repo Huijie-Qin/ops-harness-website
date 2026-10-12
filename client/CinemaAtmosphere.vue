@@ -22,10 +22,27 @@ onMounted(() => {
   // Fixed distribution keeps the composition stable across resize and remount.
   let seed = 73
   const random = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 }
-  const particles = Array.from({ length: 170 }, () => ({
-    u: random(), v: .12 + random() * .75, depth: random(), phase: random() * Math.PI * 2,
-    radius: .45 + random() * .8, opacity: .16 + random() * .28, ox: 0, oy: 0,
-  }))
+  const particles = Array.from({ length: 180 }, (_, i) => {
+    // A few larger foreground motes give depth without filling the page with stars.
+    const depth = i % 6 === 0 ? .9 : i % 2 === 0 ? .52 : .18
+    return {
+      u: random(), v: .1 + random() * .79, depth, phase: random() * Math.PI * 2,
+      radius: .55 + depth * 1.25 + random() * .35,
+      opacity: .22 + depth * .32 + random() * .12, ox: 0, oy: 0,
+    }
+  })
+  // Reuse one soft sprite and a bounded wake pool: no per-particle blur or allocation.
+  const glow = document.createElement('canvas')
+  glow.width = glow.height = 64
+  const glowContext = glow.getContext('2d')!
+  const light = glowContext.createRadialGradient(32, 32, 0, 32, 32, 32)
+  light.addColorStop(0, 'rgba(218,234,241,.8)')
+  light.addColorStop(.18, 'rgba(187,219,233,.35)')
+  light.addColorStop(.5, 'rgba(133,182,207,.1)')
+  light.addColorStop(1, 'rgba(133,182,207,0)')
+  glowContext.fillStyle = light; glowContext.fillRect(0, 0, 64, 64)
+  const wake = Array.from({ length: 32 }, () => ({ x: 0, y: 0, vx: 0, vy: 0, life: 0, radius: 0 }))
+  let wakeIndex = 0, wakeDistance = 0
   const smooth = (from: number, to: number, value: number) => {
     const p = Math.min(1, Math.max(0, (value - from) / (to - from)))
     return p * p * (3 - 2 * p)
@@ -34,41 +51,75 @@ onMounted(() => {
     const top = Math.min(1, Math.max(0, (y / height - .1) / .12))
     const bottom = Math.min(1, Math.max(0, (.91 - y / height) / .09))
     // Keep the light product panel and the headline optically clean.
-    const panel = 1 - smooth(.24, .4, x / width) * (1 - smooth(.62, .78, y / height)) * .8
-    const copy = 1 - (1 - smooth(.32, .46, x / width)) * smooth(.43, .57, y / height) * .75
+    const panel = 1 - smooth(.24, .4, x / width) * (1 - smooth(.62, .78, y / height)) * .78
+    const copy = 1 - (1 - smooth(.32, .46, x / width)) * smooth(.43, .57, y / height) * .68
     return top * bottom * panel * copy
+  }
+  function drawGlow(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, alpha: number) {
+    ctx.globalAlpha = alpha
+    ctx.drawImage(glow, x - radius, y - radius, radius * 2, radius * 2)
+    ctx.globalAlpha = 1
   }
   function paint(dt = 0) {
     const ctx = context!
-    const ease = 1 - Math.exp(-dt / 145), t = elapsed / 1000
+    const ease = 1 - Math.exp(-dt / 180), settle = 1 - Math.exp(-dt / 320), t = elapsed / 1000
+    const previousX = pointer.x, previousY = pointer.y
     pointer.x += (pointer.tx - pointer.x) * ease
     pointer.y += (pointer.ty - pointer.y) * ease
     pointer.strength += ((pointer.inside ? 1 : 0) - pointer.strength) * ease
     ctx.clearRect(0, 0, width, height)
     const strength = available.value && !props.suspended ? pointer.strength : 0
+    const travelX = pointer.x - previousX, travelY = pointer.y - previousY
+    const travel = Math.hypot(travelX, travelY)
+    const velocityX = dt ? travelX / dt : 0, velocityY = dt ? travelY / dt : 0
     if (strength > .005) {
-      const radius = Math.min(290, width * .22)
-      const halo = ctx.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, radius)
-      const alpha = strength * .065 * fieldOpacity(pointer.x, pointer.y)
-      halo.addColorStop(0, `rgba(166,197,215,${alpha})`)
-      halo.addColorStop(.42, `rgba(119,156,185,${alpha * .42})`)
-      halo.addColorStop(1, 'rgba(119,156,185,0)')
-      ctx.fillStyle = halo
-      ctx.fillRect(pointer.x - radius, pointer.y - radius, radius * 2, radius * 2)
+      const radius = Math.min(380, width * .29)
+      // A broad, oblique wash follows the hand; no hard cursor ring.
+      ctx.save(); ctx.translate(pointer.x, pointer.y); ctx.rotate(-.38); ctx.scale(1.3, .7)
+      drawGlow(ctx, 0, 0, radius, strength * .26 * fieldOpacity(pointer.x, pointer.y))
+      ctx.restore()
     }
-    const count = width < 700 ? 38 : Math.min(particles.length, Math.round(width / 8.5))
+    if (pointer.inside && strength > .1 && travel > 1) {
+      wakeDistance += travel
+      // At most 30 motes/second; the 32-slot pool outlasts the 1.05-second fade.
+      const emit = Math.min(1, Math.floor(wakeDistance / 16))
+      wakeDistance %= 16
+      for (let i = 0; i < emit; i++) {
+        const p = wake[wakeIndex++ % wake.length]!, angle = random() * Math.PI * 2
+        const spread = 20 + random() * 65, along = (i + .5) / emit
+        p.x = previousX + travelX * along + Math.cos(angle) * spread
+        p.y = previousY + travelY * along + Math.sin(angle) * spread
+        p.vx = velocityX * .07 + Math.cos(angle) * .018
+        p.vy = velocityY * .07 + Math.sin(angle) * .018
+        p.life = 1; p.radius = .8 + random() * 1.3
+      }
+    }
+    const count = width < 700 ? 38 : Math.min(particles.length, Math.round(width / 7.8))
     for (let i = 0; i < count; i++) {
       const p = particles[i]!
-      const x = p.u * width + Math.sin(t * .085 + p.phase) * (9 + p.depth * 11)
-      const y = p.v * height + Math.cos(t * .11 + p.phase) * (7 + p.depth * 9)
+      const x = p.u * width + Math.sin(t * .18 + p.phase) * (12 + p.depth * 30)
+      const y = p.v * height + Math.cos(t * .22 + p.phase) * (10 + p.depth * 24)
       const dx = x - pointer.x, dy = y - pointer.y, distance = Math.hypot(dx, dy)
-      const influence = Math.max(0, 1 - distance / 185) ** 2 * strength
-      const force = influence * (24 + p.depth * 12)
-      p.ox += ((dx / Math.max(1, distance)) * force - p.ox) * ease
-      p.oy += ((dy / Math.max(1, distance)) * force - p.oy) * ease
-      const alpha = (p.opacity + influence * .38) * fieldOpacity(x, y) * (width < 700 ? .45 : 1)
-      ctx.fillStyle = `rgba(192,212,223,${alpha})`
-      ctx.beginPath(); ctx.arc(x + p.ox, y + p.oy, p.radius, 0, Math.PI * 2); ctx.fill()
+      const influence = Math.max(0, 1 - distance / 300) ** 1.5 * strength
+      const force = influence * (48 + p.depth * 42)
+      const carry = influence * (14 + p.depth * 22)
+      p.ox += ((dx / Math.max(1, distance)) * force + Math.max(-1, Math.min(1, velocityX)) * carry - p.ox) * settle
+      p.oy += ((dy / Math.max(1, distance)) * force + Math.max(-1, Math.min(1, velocityY)) * carry - p.oy) * settle
+      const px = x + p.ox, py = y + p.oy
+      const alpha = Math.min(.92, p.opacity + influence * .65) * fieldOpacity(px, py) * (width < 700 ? .4 : 1)
+      const radius = p.radius * (1 + influence * .4)
+      if (p.depth > .7 || influence > .12) drawGlow(ctx, px, py, radius * 5, alpha * .75)
+      ctx.fillStyle = `rgba(212,230,239,${alpha})`
+      ctx.beginPath(); ctx.arc(px, py, radius, 0, Math.PI * 2); ctx.fill()
+    }
+    for (const p of wake) {
+      if (p.life <= 0) continue
+      p.life = Math.max(0, p.life - dt / 1050)
+      p.x += p.vx * dt; p.y += p.vy * dt
+      const alpha = Math.sin(p.life * Math.PI) * .65 * fieldOpacity(p.x, p.y)
+      drawGlow(ctx, p.x, p.y, p.radius * 7, alpha)
+      ctx.fillStyle = `rgba(221,235,242,${alpha})`
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2); ctx.fill()
     }
     if (artwork) {
       const x = (pointer.x / width - .5) * strength * 9
@@ -92,6 +143,8 @@ onMounted(() => {
     else {
       pointer.inside = false; pointer.strength = 0
       for (const p of particles) { p.ox = 0; p.oy = 0 }
+      for (const p of wake) p.life = 0
+      wakeDistance = 0
       paint()
     }
   }
