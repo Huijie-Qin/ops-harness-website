@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import Icon from './Icon.vue'
-import WorkspacePreview from './WorkspacePreview.vue'
+import HomeChapters from './HomeChapters.vue'
 import CinemaHero from './CinemaHero.vue'
+import './home-download.css'
 import { PhArrowUpRight } from '@phosphor-icons/vue'
 import ReleaseTypeBadge from './ReleaseTypeBadge.vue'
 import { getReleaseType } from '@dsh-ops/release-contract'
@@ -55,12 +56,6 @@ onMounted(() => {
   if (page === 'home' || page === 'releases') void refresh()
 })
 onBeforeUnmount(() => { controller?.abort(); controller = undefined; document.removeEventListener('keydown', closeMenuOnEscape) })
-const features = [
-  { icon: 'spark', title: '先看今天的重点', description: '根据日程与邮件整理重点事项和行动建议，让一天从值得关注的工作开始。', tag: '今日重点' },
-  { icon: 'clock', title: '提前安排这一周', description: '集中查看未来一周的日程与待参加会议，了解时间安排，提前做好准备。', tag: '日程安排' },
-  { icon: 'mail', title: '及时跟进重要邮件', description: '汇集最近 7 天的邮件，区分已读与未读，按需打开详情，接着推进工作。', tag: '邮件跟进' },
-  { icon: 'chat', title: '带着上下文继续讨论', description: '从重点事项发起 AI 对话，结合相关日程和邮件信息，梳理下一步行动。', tag: '行动建议' },
-]
 </script>
 
 <template>
@@ -69,13 +64,34 @@ const features = [
   <main id="main" tabindex="-1">
     <template v-if="page === 'home'">
       <CinemaHero />
-      <section id="product" class="product-section container">
-        <div class="section-intro"><span class="eyebrow text-only">目标 · 待办</span><h2>今天的重点，一眼看清。</h2><p>汇集日程与邮件，整理优先事项，让下一步更清楚。</p></div>
-        <WorkspacePreview />
+      <HomeChapters />
+      <section id="download" class="download-section home-download" aria-labelledby="download-title">
+        <div class="container">
+          <span class="eyebrow text-only">准备好开始了吗</span>
+          <h2 id="download-title">把工作助手，带到你的桌面。</h2>
+          <p class="section-subtitle">{{ latest ? `最新稳定版 v${latest.version} · ${date(latest.publishedAt)}` : '支持 Windows x64 与 macOS Apple Silicon' }}</p>
+          <div v-if="error" class="notice" role="alert">
+            <span>暂时无法获取安装包信息。</span>
+            <button class="text-button" @click="refresh">重新加载</button>
+          </div>
+          <p v-else-if="loading" class="loading-text" role="status">正在获取版本信息…</p>
+          <div class="download-grid">
+            <article v-for="platform in downloadPlatforms" :key="platform.key" class="download-card">
+              <Icon :name="platform.icon" :size="34" />
+              <h3>{{ platform.name }}</h3>
+              <p>{{ platform.detail }}</p>
+              <a v-if="downloadFor(platform.key, platform.extension)" class="button primary" :href="downloadFor(platform.key, platform.extension)!.url">
+                <Icon name="download" :size="17" />{{ platform.label }}
+              </a>
+              <span v-else class="button disabled" aria-disabled="true">{{ loading ? '正在获取…' : '安装包准备中' }}</span>
+              <small v-if="downloadFor(platform.key, platform.extension)">{{ size(downloadFor(platform.key, platform.extension)!.size) }} · v{{ downloadFor(platform.key, platform.extension)!.version }}</small>
+              <small v-else>发布后将在这里提供下载</small>
+              <a v-if="platform.key === 'windows-x64' && downloadFor(platform.key, '.zip')" class="text-link portable" :href="downloadFor(platform.key, '.zip')!.url">下载免安装 ZIP</a>
+            </article>
+          </div>
+          <a class="text-link release-link" href="/releases">查看更新说明<Icon name="arrow" :size="18" /></a>
+        </div>
       </section>
-      <section class="features-section container"><div class="section-intro"><span class="eyebrow text-only">看清重点，逐步推进</span><h2>从待办到行动，<br />让工作更有条理。</h2><p>连接 WeLink 后，将日程和邮件汇集到同一个工作空间。</p></div><div class="feature-grid"><article v-for="feature in features" :key="feature.title" class="feature"><span class="feature-icon"><Icon :name="feature.icon" :size="25" /></span><span class="feature-tag">{{ feature.tag }}</span><h3>{{ feature.title }}</h3><p>{{ feature.description }}</p></article></div></section>
-      <section class="local-section container"><div class="local-visual"><Icon name="shield" :size="55" /><div class="local-file"><Icon name="book" /><span>你的资料与会话</span><Icon name="check" :size="18" /></div><div class="local-file"><Icon name="grid" /><span>你的工作空间</span><Icon name="check" :size="18" /></div><span class="local-caption">保存在你的电脑上</span></div><div><span class="eyebrow text-only">从容开始，持续积累</span><h2>安装即可打开，<br />工作留在本地。</h2><p>应用自动准备工作环境，配置模型后即可开始。会话、配置和工作资料独立于安装目录，应用升级时继续保留。</p><p class="muted-note">使用在线模型和外部工具时，相关内容会发送到你配置的服务。</p><a class="text-link" href="/guide">了解如何开始<Icon name="arrow" :size="18" /></a></div></section>
-      <section id="download" class="download-section"><div class="container"><span class="eyebrow text-only">准备好开始了吗</span><h2>为你的电脑，选择终端云工作助手。</h2><p class="section-subtitle">{{ latest ? `最新稳定版 v${latest.version} · ${date(latest.publishedAt)}` : '支持 Windows x64 与 macOS Apple Silicon' }}</p><div v-if="error" class="notice" role="alert">暂时无法获取安装包信息。<button class="text-button" @click="refresh">重新加载</button></div><p v-else-if="loading" class="loading-text" role="status">正在获取版本信息…</p><div class="download-grid"><article v-for="platform in downloadPlatforms" :key="platform.key" class="download-card"><Icon :name="platform.icon" :size="30" /><h3>{{ platform.name }}</h3><p>{{ platform.detail }}</p><a v-if="downloadFor(platform.key, platform.extension)" class="button primary" :href="downloadFor(platform.key, platform.extension)!.url"><Icon name="download" :size="17" />{{ platform.label }}</a><span v-else class="button disabled" aria-disabled="true">{{ loading ? '正在获取…' : '安装包准备中' }}</span><small v-if="downloadFor(platform.key, platform.extension)">{{ size(downloadFor(platform.key, platform.extension)!.size) }} · v{{ downloadFor(platform.key, platform.extension)!.version }}</small><small v-else>发布后将在这里提供下载</small><a v-if="platform.key === 'windows-x64' && downloadFor(platform.key, '.zip')" class="text-link portable" :href="downloadFor(platform.key, '.zip')!.url">下载免安装 ZIP</a></article></div><a class="text-link release-link" href="/releases">查看更新说明<Icon name="arrow" :size="18" /></a></div></section>
     </template>
     <GuidePage v-else-if="page === 'guide'" />
     <GuideAdmin v-else-if="page === 'admin'" />
@@ -83,5 +99,5 @@ const features = [
       <section class="page-heading container"><span class="eyebrow text-only">更新说明</span><h1>每次更新，<br />让工作更进一步。</h1><p>了解新增能力、体验改进，以及当前可下载的版本。</p><p class="release-channel-note">应用默认接收正式版。可在桌面应用的“设置 → 帮助”开启测试版更新，接收 Beta / RC；其他预览版本仅供手动下载。</p></section><section class="release-list container"><div v-if="error" class="notice" role="alert">更新记录暂时无法加载。<button class="text-button" @click="refresh">重试</button></div><p v-else-if="loading" role="status">正在加载更新记录…</p><article v-for="release in releases" :id="`v${release.version}`" :key="release.version" class="release-entry"><div class="release-meta"><span class="version-tag">v{{ release.version }}</span><time :datetime="release.publishedAt">{{ date(release.publishedAt) }}</time><ReleaseTypeBadge :version="release.version" /></div><div><h2>{{ release.title }}</h2><ul><li v-for="note in release.notes" :key="note">{{ note }}</li></ul><div class="release-downloads"><a v-for="download in release.downloads" :key="download.name" :href="download.url" class="text-link"><Icon name="download" :size="16" />{{ download.platform === 'windows-x64' ? 'Windows' : 'macOS' }} · {{ download.name.split('.').at(-1)!.toUpperCase() }}<span>{{ size(download.size) }}</span></a></div></div></article><article v-if="!loading && !releases.length" class="release-entry development-entry"><div class="release-meta"><span class="version-tag muted">开发中</span><span class="release-channel">尚未发布安装包</span></div><div><h2>{{ development.title }}</h2><ul><li v-for="note in development.notes" :key="note">{{ note }}</li></ul><p class="muted-note">以下为当前开发内容。正式版本及下载链接将在完成发布后显示。</p></div></article></section>
     </template>
   </main>
-  <footer v-if="page !== 'admin'" class="site-footer container"><a class="brand" href="/"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><p>为日常工作而生。</p><div><a href="/guide">使用指南</a><a href="/releases">更新说明</a><span>© {{ new Date().getFullYear() }} 终端云工作助手</span></div></footer>
+  <footer v-if="page !== 'admin'" class="site-footer container" :class="{ 'home-footer': page === 'home' }"><a class="brand" href="/"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><p>为日常工作而生。</p><div><a href="/guide">使用指南</a><a href="/releases">更新说明</a><span>© {{ new Date().getFullYear() }} 终端云工作助手</span></div></footer>
 </template>
