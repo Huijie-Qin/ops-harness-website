@@ -84,3 +84,16 @@ final result: passed
 - 独立 Chrome 标签页验收 `http://127.0.0.1:4177/`，截图为 `docs/qa/cinema-video/title-update.jpg`。确认新标题清晰可见，原播放入口与页面文案正常；图片 complete 为 true，naturalWidth / naturalHeight 为 1487 / 1058。进入使用指南并返回首页后恢复正常，Console warning / error 为空。
 - `pnpm build` 通过；`pnpm check` 的类型检查通过，119 项测试中 118 项通过。唯一失败仍为此前已记录的 Windows 发布草稿删除用例（`test/admin-content.test.ts:105`，503 而非 200），与本次图片替换无关。
 - 原设计稿与旧验收截图作为历史证据保留。本次未部署、未修改或提交 MP4，未改变运行时视频目录。
+
+## 2026-10-12 首页光尘可见度增强
+
+用户认为既有粒子过于微弱，本次在已合并 PR #8 的 `7214e9d` 上增强光尘层次与鼠标反馈，保留电影式构图、标题、播放入口和产品图片。
+
+- 将光尘分为远、中、近三层，增大少量近景粒子，使用银蓝色柔光并提高暗部对比；原有产品面板、标题及边缘的亮度衰减仍保留。桌面截图：`docs/qa/cinema-video/motion-v2-active.jpg`。
+- 鼠标影响范围从 185px 扩至 300px，增加有惯性的拨动和顺势位移；斜向柔光随鼠标移动，周围少量光尘约 1 秒渐隐。没有连线、圆环或闪烁特效，标题和 CTA 保持固定，图片视差上限不变。
+- 使用一张预绘制的 64px 柔光 sprite，最多 180 个常驻光尘与 32 个复用的余光粒子；每次绘制最多发射一个，避免高速移动时覆盖尚未消失的粒子。保持最高 30fps、DPR 1.5，绘制时不创建粒子渐变、不做粒子间连线。
+- 实际浏览器鼠标路径验收，光尘拨动与图片微视差可见，截图中图片位移约 -2.3px / -0.8px，画面没有露边。暂停后 canvas 状态为 paused、图片 transform 清空；键盘 Enter 可恢复动效。
+- 从 running 打开影片会自动暂停，Escape 关闭后恢复 running 并返回播放按钮焦点；手动暂停后打开和关闭影片仍为 paused。滚动到下载区域后 canvas 完全离屏，状态 paused；进入使用指南后 canvas 已卸载，返回首页正常恢复。
+- 390 × 844 响应式检查：静态光尘、隐藏动效开关、无横向溢出，见 `motion-v2-mobile.jpg`。测试后恢复默认 viewport。系统 reduced-motion、粗指针、后台可见性等既有门控保留并通过代码审阅，本次未切换 OS 级设置或做硬件性能基准。
+- `pnpm build`、类型检查、`git diff --check` 通过。`pnpm check` 共 119 项测试、118 项通过；唯一失败仍为既有 Windows 发布草稿删除测试 `test/admin-content.test.ts:105`（503 而非 200），此前已记录基线复现。最终浏览器 Console warning/error 为空。
+- 本次不更改运行时视频内容，不提交 MP4，不部署线上服务。
