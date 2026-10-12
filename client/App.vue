@@ -2,7 +2,8 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import Icon from './Icon.vue'
 import WorkspacePreview from './WorkspacePreview.vue'
-import HeroAtmosphere from './HeroAtmosphere.vue'
+import CinemaHero from './CinemaHero.vue'
+import { PhArrowUpRight } from '@phosphor-icons/vue'
 import ReleaseTypeBadge from './ReleaseTypeBadge.vue'
 import { getReleaseType } from '@dsh-ops/release-contract'
 const GuidePage = defineAsyncComponent(() => import('./GuidePage.vue'))
@@ -64,20 +65,10 @@ const features = [
 
 <template>
   <a class="skip-link" href="#main" @click="skipAdmin">跳到正文</a>
-  <header v-if="page !== 'admin'" class="site-header" :class="{ 'home-header': page === 'home' }"><div class="header-inner"><a class="brand" href="/" aria-label="终端云工作助手 首页"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><button ref="menuToggle" class="menu-toggle" :aria-expanded="menuOpen" aria-controls="site-nav" @click="menuOpen = !menuOpen">{{ menuOpen ? '关闭菜单' : '菜单' }}</button><nav id="site-nav" :class="{ open: menuOpen }" aria-label="主导航"><a href="/" :aria-current="page === 'home' ? 'page' : undefined">产品介绍</a><a href="/guide" :aria-current="page === 'guide' ? 'page' : undefined">使用指南</a><a href="/releases" :aria-current="page === 'releases' ? 'page' : undefined">更新说明</a><a class="button small primary" href="/#download"><Icon name="download" :size="16" />下载桌面版</a></nav></div></header>
+  <header v-if="page !== 'admin'" class="site-header" :class="{ 'home-header': page === 'home' }"><div class="header-inner"><a class="brand" href="/" aria-label="终端云工作助手 首页"><img src="/brand.svg" alt="" /><span>终端云工作助手</span></a><button ref="menuToggle" class="menu-toggle" :aria-expanded="menuOpen" aria-controls="site-nav" @click="menuOpen = !menuOpen">{{ menuOpen ? '关闭菜单' : '菜单' }}</button><nav id="site-nav" :class="{ open: menuOpen }" aria-label="主导航"><a href="/" :aria-current="page === 'home' ? 'page' : undefined">产品介绍</a><a href="/guide" :aria-current="page === 'guide' ? 'page' : undefined">使用指南</a><a href="/releases" :aria-current="page === 'releases' ? 'page' : undefined">更新说明</a><a v-if="page === 'home'" class="cinema-download" href="/#download">下载桌面版<PhArrowUpRight :size="17" weight="light" /></a><a v-else class="button small primary" href="/#download"><Icon name="download" :size="16" />下载桌面版</a></nav></div></header>
   <main id="main" tabindex="-1">
     <template v-if="page === 'home'">
-      <section class="hero-stage">
-        <HeroAtmosphere />
-        <div class="hero container">
-          <div class="eyebrow"><span class="live-dot"></span>让每一份工作，都有好方法</div>
-          <h1>让想法，成为<br /><span>完成的工作。</span></h1>
-          <p class="hero-description">从今天的重点出发，把日程、邮件与待办放在一起。<br />终端云工作助手，陪你有条理地推进每一天。</p>
-          <div class="hero-actions"><a class="button primary" href="#download"><Icon name="download" :size="19" />下载桌面版</a><a class="button secondary" href="/guide">开始使用<Icon name="arrow" :size="18" /></a></div>
-          <p class="hero-footnote">Windows · macOS Apple Silicon <span>本地工作空间</span></p>
-          <a class="hero-explore" href="#product">探索工作空间<Icon name="arrow" :size="16" /></a>
-        </div>
-      </section>
+      <CinemaHero />
       <section id="product" class="product-section container">
         <div class="section-intro"><span class="eyebrow text-only">目标 · 待办</span><h2>今天的重点，一眼看清。</h2><p>汇集日程与邮件，整理优先事项，让下一步更清楚。</p></div>
         <WorkspacePreview />
