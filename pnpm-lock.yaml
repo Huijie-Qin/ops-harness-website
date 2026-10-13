@@ -17,6 +17,9 @@ importers:
       '@dsh-ops/tracking-contract':
         specifier: file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz
         version: file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz
+      '@phosphor-icons/vue':
+        specifier: 2.2.1
+        version: 2.2.1(vue@3.5.42(typescript@5.9.2))
       markdown-it:
         specifier: 15.0.2
         version: 15.0.2
@@ -251,6 +254,12 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [glibc]
+
+  '@phosphor-icons/vue@2.2.1':
+    resolution: {integrity: sha512-3RNg1utc2Z5RwPKWFkW3eXI/0BfQAwXgtFxPUPeSzi55jGYUq16b+UqcgbKLazWFlwg5R92OCLKjDiJjeiJcnA==}
+    engines: {node: '>=14'}
+    peerDependencies:
+      vue: '>=3.2.39'
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
@@ -752,6 +761,10 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
+
+  '@phosphor-icons/vue@2.2.1(vue@3.5.42(typescript@5.9.2))':
+    dependencies:
+      vue: 3.5.42(typescript@5.9.2)
 
   '@rolldown/pluginutils@1.0.1': {}
 

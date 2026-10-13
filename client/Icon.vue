@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { PhFilmSlate } from '@phosphor-icons/vue'
 defineProps<{ name: string; size?: number }>()
 const paths: Record<string, string> = {
   arrow: 'M5 12h14m-6-6 6 6-6 6',
@@ -18,4 +19,4 @@ const paths: Record<string, string> = {
   chevron: 'm9 5 7 7-7 7',
 }
 </script>
-<template><svg :width="size || 22" :height="size || 22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] || paths.spark" /></svg></template>
+<template><PhFilmSlate v-if="name === 'video'" :size="size || 22" weight="regular" aria-hidden="true" /><svg v-else :width="size || 22" :height="size || 22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] || paths.spark" /></svg></template>

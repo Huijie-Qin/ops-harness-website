@@ -30,14 +30,15 @@ pnpm start
 
 ## 首页与使用指南
 
-- `client/HeroAtmosphere.vue`：参考 [DeepSeek Harness 官网](https://www.deepseek.com/harness/) 的蓝色光场与点阵空间感，自行实现 Canvas 动画。鼠标移动带动柔光、扩散涟漪与点阵视差/避让；支持暂停、系统减少动态效果偏好，以及离开可见区域/后台时停止刷新；不加载外部动画脚本。
+- `client/CinemaHero.vue` / `VideoDialog.vue`：首页使用电影感产品封面，点击“观看产品影片”后在弹窗播放管理员发布的首页主片。支持原生播放控件、加载重试、Escape / 点击遮罩关闭、焦点恢复与窄屏布局；打开弹窗前不加载视频。无主片时提供使用指南入口。封面 `cinema-hero.webp` 是根据已确认视觉稿制作的宣传美术图，不作为真实产品界面验收截图。
+- `client/CinemaAtmosphere.vue`：暗部光尘缓慢漂浮，响应鼠标的局部避让、柔光和主图微视差；文字及操作位置保持固定。底栏提供暂停按钮；打开影片、滚动离屏或切至后台时停止绘制。窄屏、粗指针及系统减少动态效果时使用静态效果；绘制上限 30 fps、DPR 上限 1.5，不引入动画依赖。
 - `client/WorkspacePreview.vue` / `ProductShot.vue`：首页仅展示“目标 · 待办”，以今日重点、日程、邮件和行动建议为介绍重点，支持查看原图。展示图保存在 `public/assets/product/`，由开发与生产服务统一提供 `/assets/product/` 路径。工具市场、我的技能、我的专家暂不在首页介绍，其既有指南内容与配图保留。
 - `content/guide/*.md`：11 个独立 Markdown 章节，包含操作步骤、完成标志、示例与常见问题。更新功能时同步核对对应插件 README 和实际界面，不能将待接入能力描述为已经可用。
 - `client/GuidePage.vue`：全文搜索、分组目录、前后章导航和示例复制。支持章节链接及原有 `#step-1` 至 `#step-4` 链接。
 
 ### 管理员与 Markdown 维护
 
-管理员入口为 `/admin`。包含“文档编辑、目录与文档管理、发布包、图片库”四个区域。文档编辑页只编辑 Markdown 正文，提供文档选择、预览和正文历史恢复。目录与文档管理页以分组列表集中处理新建、名称与简介、移动、排序、隐藏及回收恢复，操作按钮直接显示。旧 `/guide/admin` 地址自动跳转到 `/admin`。完整操作、内容格式、部署凭据与备份方式见 [帮助文档维护手册](docs/runbooks/website-guide-maintenance.md)。选型比较见 [ADR 0012](docs/adr/0012-markdown-guide-administration.md)。
+管理员入口为 `/admin`。包含文档编辑、目录与文档管理、发布包、图片库、知识库、专家与新增的“视频内容”区域。视频内容支持产品宣传、特性使用、最佳实践分类，以及 MP4 上传、封面、预览、发布和设为首页主片；草稿视频只对管理员开放。文档编辑页只编辑 Markdown 正文，提供文档选择、预览和正文历史恢复。目录与文档管理页以分组列表集中处理新建、名称与简介、移动、排序、隐藏及回收恢复，操作按钮直接显示。旧 `/guide/admin` 地址自动跳转到 `/admin`。完整操作、内容格式、部署凭据与备份方式见 [帮助文档维护手册](docs/runbooks/website-guide-maintenance.md)。选型比较见 [ADR 0012](docs/adr/0012-markdown-guide-administration.md)，视频存储与发布边界见 [ADR 0025](docs/adr/0025-video-content.md)。
 
 `client/GuideAdmin.vue` / `MarkdownEditor.vue` 提供管理员登录、Vditor 编辑、阅读预览、版本历史与回收站。管理员密码通过环境提供，没有默认密码；未配置时编辑接口关闭，公开阅读不受影响。日常保存发布到 `.runtime/website-content`。管理员可明确点击“同步到 content”，核对清单后将修改过的文档、目录和图片写回源码，以便检查并提交到主仓；不会自动执行 Git 操作。
 
@@ -130,6 +131,12 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | GET/PUT /api/admin/navigation | 分组、章节顺序与隐藏配置 |
 | GET/POST /api/admin/images | 图片库及原始二进制上传（name 查询参数） |
 | GET/HEAD /media/:sha256.:ext | 受控图片公开读取 |
+| GET /api/videos | 已发布的视频目录 |
+| GET/HEAD /videos/:sha256.mp4 | 已发布视频流，支持 Range |
+| GET/POST /api/admin/videos | 视频目录 / 新建草稿 |
+| PUT/DELETE /api/admin/videos/:id | 更新、发布、下架、设为主片 / 移入回收目录，需 revision |
+| POST /api/admin/videos/:id/file?name=... | MP4 上传，最多 512 MiB，需 X-Revision；仅草稿可替换文件 |
+| GET/HEAD /api/admin/videos/:id/preview | 已登录管理员预览草稿或已发布视频 |
 | POST /api/admin/releases/manifest | 校验打包描述文件并预览版本、平台和文件清单（不创建草稿） |
 | GET/POST /api/admin/releases | 发布清单 / 用描述文件和更新说明新建草稿 |
 | PUT /api/admin/releases/drafts/:id/manifest | 为旧草稿补充描述文件并校验已有文件，需 revision |
@@ -139,7 +146,8 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | PUT /api/admin/releases/published/:version | 修改版本说明及上下架状态 |
 | GET/POST /api/admin/knowledge | 知识库目录（含下架条目） / 新建条目 |
 | PUT/DELETE /api/admin/knowledge/:id | 修改、删除知识库条目 |
-| POST/DELETE /api/admin/knowledge/skill?name=... | 上传、移除全部知识库共用的配套技能文件；上传使用 X-Revision |
+| POST /api/admin/knowledge/skills?name=... | 上传技能文件；相同技能名替换原文件，上传使用 X-Revision |
+| DELETE /api/admin/knowledge/skills/:name | 移除未被知识库引用的技能，需 revision |
 
 二进制上传使用 `application/octet-stream`，总超时 30 分钟，空闲超时 60 秒。最多两个并行上传；JSON 仍限制大小并使用 15 秒接收超时。生产网关需要匹配请求大小、超时，并转发原始 Host。备份时保留 `contentDirectory` 和 `releaseDirectory`。详见 [ADR 0013](docs/adr/0013-website-admin-assets-and-releases.md)。
 
@@ -161,8 +169,11 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 | GET /updates/archive/:version/windows-x64/latest.yml | electron-updater NSIS 元数据 |
 | GET /updates/archive/:version/macos-arm64/latest-mac.yml | electron-updater macOS 元数据 |
 | GET /updates/archive/:version/:platform/:filename | 目录中登记的文件，支持 HEAD、单段 Range、ETag |
-| GET /api/knowledge/metrics | 已上架的指标知识库元数据目录，带 ETag 与 If-None-Match |
-| GET /api/knowledge/metrics/skill | 全部知识库共用的配套技能文件字节，ETag 为内容 SHA-256 |
+| GET /api/knowledge/metrics | 旧客户端 v1 当前配置投影，单公共技能与三个固定工作流 |
+| GET /api/knowledge/metrics/skill | 原公共技能的当前文件，按持久身份定位 |
+| GET /api/knowledge/metrics/v2 | 新客户端完整工作流映射与每库单技能引用 |
+| GET /api/knowledge/metrics/v2/skills/:name/:sha256 | 指定名称与哈希的不可变技能文件 |
+| GET /api/knowledge/metrics/skills/:name | 按技能名下载文件字节，ETag 为内容 SHA-256 |
 | GET /api/experts/v1/catalog | 当前工号可见的云端专家目录与这些专家引用的自定义工具定义（工号放在 `X-Ops-Employee-Id` 请求头）；带 `X-Ops-Expert-Features: scenarios` 时另含专家常用场景与内置专家场景覆盖。ETag 按工号与特性区分 |
 | GET /api/experts/v1/experts/:id/versions/:n/responsibility | 已发布版本的职责全文，不可见一律 404 |
 | GET /api/experts/v1/experts/:id/versions/:n/skills/:name | 已发布版本的技能文件字节，带 `X-Skill-Sha256` |
@@ -173,35 +184,43 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 ## 知识库元数据（指标知识库）
 
-管理员在 `/admin` 的“知识库”页签集中维护指标知识库的元数据与配套技能文件；办公助手匿名读取公开目录，刷新知识中心即可看到最新结果。官网只保存和分发元数据与技能文件，不连接 DataAgent、不保存租户凭据，也不解析或执行技能内容。
+管理员在 `/admin` 的“知识库”页签集中维护指标知识库的元数据与技能文件，可上传多个技能，再为每个知识库选择引用一个技能（也可不引用）。检索工作流以“名称 / 值”逐行维护。官网只保存和分发元数据与技能文件，不连接 DataAgent、不保存租户凭据，也不执行技能内容。办公助手需要接入下述 v2 公开契约后才能消费各知识库引用的技能与自定义工作流；本仓库不包含产品端接入实现。
 
 ### 存储布局
 
 ```text
-.runtime/website-content/knowledge/catalog.json        # 目录本体，schemaVersion + updatedAt + items
+.runtime/website-content/knowledge/catalog.json        # v2 目录本体，schemaVersion + updatedAt + skills + items + legacy_skill_name
 .runtime/website-content/knowledge/skills/<sha256>.zip # 按内容哈希落盘的技能文件，不可覆盖
 .runtime/website-content/knowledge/skills/<sha256>.md
 .runtime/website-content/knowledge/.trash/catalog-<时间戳>.json  # 覆盖或删除前的目录副本
 ```
 
-写入使用 `knowledge/.knowledge-lock` 互斥锁与同目录临时文件 + rename。`revision` 是 `catalog.json` 规范化内容的 SHA-256，不写进文件本身；所有写接口必须携带当前 `revision`，不一致返回 `409 REVISION_CONFLICT`。条目上限 500，`id` 创建后不可修改，`tenant_id` 在目录内唯一；`id` 省略时由服务端生成 `metrics-` + 10 位十六进制。配套技能是整个目录共用的一份（`catalog.skill`），删除条目不影响它；替换技能后旧文件仍按哈希保留在 `skills/`。
+写入使用 `knowledge/.knowledge-lock` 互斥锁与同目录临时文件 + rename。`revision` 是 `catalog.json` 规范化内容的 SHA-256，不写进文件本身；所有写接口必须携带当前 `revision`，不一致返回 `409 REVISION_CONFLICT`。条目上限 500，`id` 创建后不可修改，`tenant_id` 在目录内唯一；`id` 省略时由服务端生成 `metrics-` + 10 位十六进制。`catalog.skills` 最多保存 100 个名称唯一的技能，各条目的 `skill_name: string | null` 引用其中一个名称；同一个技能可以被多个知识库复用。替换同名技能保留引用，删除知识库不删除技能；替换或移除技能后旧文件仍按哈希保留在 `skills/`。
+
+读取旧 `schemaVersion: 1` 目录时，顶层 `skill` 转换为 `skills` 数组，所有旧知识库自动以 `skill_name` 引用原公共技能；没有公共技能时为 `null`。`legacy_skill_name` 固定记录原公共技能身份，同名文件更新后新旧端都获取其当前版本。旧条目级 `skill` 继续忽略。读取不改写磁盘，首次成功写入前备份原目录，再原子保存 v2；升级前仍需完整备份整个 `knowledge/`，升级后重新读取 revision。
+
+未发布中间版本的 `skill_names`：零项转为 `null`，一项转为该名称，多项完整保存在 `pending_skill_names` 并在管理页提示选择一个，明确保存前不公开该条目。缺失原公共技能身份时从有效 v1 备份恢复，找不到则在管理页明确选择一次，绝不使用技能数组首项；未确认时旧接口返回 `503 LEGACY_SKILL_UNRESOLVED`，新版接口仍可用。`PUT /api/admin/knowledge/compatibility` 携带 `legacy_skill_name` 和 `revision` 完成该一次性确认。
 
 ### 公开契约
 
-`GET /api/knowledge/metrics` 只返回 `enabled` 条目，响应头 `Cache-Control: no-store`、`ETag: "<revision>"`，`If-None-Match` 命中返回 304 空响应：
+`GET /api/knowledge/metrics/v2` 的 `items` 只返回 `enabled` 条目，`skills` 返回全部已上传技能，包括尚未引用的技能。响应头 `Cache-Control: no-store`、`ETag: "<revision>"`，`If-None-Match` 命中返回 304 空响应：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "revision": "271715833d763c8e71f66c1af43188701972f1b119cf3d99f23a8c136747b494",
-  "updatedAt": "2026-09-18T14:40:24.473Z",
-  "skill": { "name": "metric-skill", "file_name": "metric-skill.zip", "sha256": "1f78d1…", "size": 336, "kind": "zip", "uploaded_at": "2026-09-18T14:40:24.473Z" },
+  "updatedAt": "2026-10-09T02:05:00.000Z",
+  "skills": [
+    { "name": "metric-skill", "file_name": "metric-skill.zip", "sha256": "1f78d1c949a2a8a65c935ee4a3a57675cd8a934502b888987023e96a0b005e4b", "size": 336, "kind": "zip", "uploaded_at": "2026-09-18T14:40:24.473Z" },
+    { "name": "report-skill", "file_name": "report-skill.md", "sha256": "a21f6abc7cd83bb67fc8e55879e51685f60899a81abc4a95605dcf8abc38e9c2", "size": 128, "kind": "md", "uploaded_at": "2026-10-09T02:00:00.000Z" }
+  ],
   "items": [
     {
       "id": "metrics-retail",
       "tenant_name": "示例零售",
       "tenant_id": "tenant-retail",
-      "knowledge_retrieve_workflow_id": { "get_card_index": "wf-card-index", "get_card_meta": "wf-card-meta", "query_card_data": "wf-card-data" },
+      "knowledge_retrieve_workflow_id": { "get_card_index": "wf-card-index", "get_card_meta": "wf-card-meta", "query_card_data": "wf-card-data", "weekly_summary": "wf-report-summary" },
+      "skill_name": "metric-skill",
       "knowledge_id": { "card_index_knowledge_base": "kb-card-index", "card_meta_knowledge_base": "kb-card-meta" },
       "knowledge_base_meta": {
         "knowledge_description": "零售业务的核心指标口径与报表说明。",
@@ -212,28 +231,38 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
       },
       "enabled": true,
       "created_at": "2026-09-18T14:40:24.371Z",
-      "updated_at": "2026-09-18T14:40:24.473Z"
+      "updated_at": "2026-10-09T02:05:00.000Z"
     }
   ]
 }
 ```
 
-字段名沿用产品侧给定的 snake_case；数据工作流键名为 `query_card_data`（2026-09-19 更正，此前误写为 `quer_card_data`：旧目录与旧请求里的该键读取时按新键处理，保存时只写新键）。长度上限：`tenant_name` 80、`tenant_id` 128、各 workflow / knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。可选字段留空时不出现在 JSON 中。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)，两端各自校验，暂不引入跨仓库契约包。
+外层字段名沿用 snake_case。`knowledge_retrieve_workflow_id` 是名称到工作流 ID 的映射，允许空对象，最多 50 项；新增或改名的 key 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，拒绝 `run_code`、`__proto__`、`constructor`、`prototype`；value 最多 256 字符。名称和值去除首尾空白后不能为空，名称不能重复。历史已存名称仍可读取和原名保存，管理页提示无效方法名，不自动改名。客户端以 key 注册方法，以 value 调用工作流。
 
-`GET /api/knowledge/metrics/skill` 返回技能文件字节，`Content-Type` 为 `application/zip` 或 `text/markdown; charset=utf-8`，`Content-Disposition: attachment` 使用原始文件名，并带 `ETag: "<sha256>"`、`X-Skill-Name`、`X-Skill-Sha256`。地址固定而文件可被替换，因此使用 `Cache-Control: no-store` 并由 `If-None-Match` 复用字节，替换后客户端立即拿到新内容。未配置技能返回 `404 SKILL_NOT_FOUND`。
+`data_query_workflows` 是可选的字符串数组，列出被标注为“数据查询”的方法 key，表示该方法的结果是可以画成图表的数据；管理页每个工作流行有对应勾选。只接受同一条目 `knowledge_retrieve_workflow_id` 中存在且不重复的名称，保存时按工作流映射的顺序整理，为空则不出现该字段。新建省略视为没有标注；更新省略保留原标注（仅保留仍存在的方法，改名或移除方法时标注随之消失），显式 `[]` 清空。历史方法 `query_card_data` 不需要标注，客户端始终把它当作数据查询。该字段只在 v2 公开目录中输出，v1 投影显式剔除，旧客户端收到的字节与 ETag 不变；已安装的新客户端在用户同步该知识库后采用修改。
+
+`skill_name` 只能为已上传技能的一个名称或 `null`。新建省略时使用 `null`，更新省略时保留引用，显式 `null` 解除引用。其余长度上限：`tenant_name` 80、`tenant_id` 128、各 knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)。
+
+原地址 `GET /api/knowledge/metrics` 始终返回 `schemaVersion: 1`，从同一份当前配置投影：只包含已上架、引用 `legacy_skill_name`（双方均无技能也允许）且三个固定工作流完整的知识库；新建且满足条件的库同样可见。每个条目移除单技能引用字段，仅保留 `get_card_index`、`get_card_meta`、`query_card_data` 并附同值 `quer_card_data` 别名；顶层 `skill` 为原公共技能的当前元数据。其他技能或自定义工作流库只供新版。迁移时旧拼写转为标准拼写，但两者同时存在且值不同时完整保留、管理页提示且不进入 v1；v2 不改写自定义 key。
+
+两种响应各自按实际表示生成 revision/ETag，互不复用 304。旧响应最多 2 MiB、新响应最多 96 MiB；写入前校验旧投影大小，超限返回 `KNOWLEDGE_CATALOG_TOO_LARGE` 且不改权威目录，不能截断旧库。修改名称、描述或原工作流 value 后两端看到同一份最新配置；下架或删除从两份公开目录移除，已绑定客户端仍遵循其原同步流程。
+
+`GET /api/knowledge/metrics/skill` 按 `legacy_skill_name` 下载当前公共技能，增加技能不影响该路径。按名称下载 `/api/knowledge/metrics/skills/:name` 继续可用。二者为 `no-store` + 内容哈希 ETag。新客户端使用 `/api/knowledge/metrics/v2/skills/:name/:sha256`，文件内容与名称双重校验，使用 `public, max-age=31536000, immutable`，同名替换后旧哈希仍可下载。所有下载带 `X-Skill-Name` 和 `X-Skill-Sha256`，未知名称或版本返回 404。旧无哈希地址保留既有跨请求上传竞态，客户端应继续校验并刷新重试，不为此冻结当前配置。
+
+旧单数上传 `POST /api/admin/knowledge/skill` 保留为上传别名。移除技能仍执行引用检查，原公共技能身份也视为占用，不能删除；需更新时同名上传即可。
 
 ### 管理流程与技能文件规则
 
-新建或编辑条目后保存即生效，无需发布步骤；“上架”开关控制是否出现在公开目录。技能文件按 `application/octet-stream` 上传，`name` 查询参数给出原始文件名，`X-Revision` 携带当前 revision。服务端只做字节级校验，不解压到磁盘、不执行任何内容：
+新建或编辑条目后保存即生效，无需发布步骤；“上架”开关控制是否出现在公开目录。先在技能区上传所需文件，再在每个知识库内选择引用并保存。上传不同技能名会增加技能；相同 frontmatter 名称会替换原技能文件并保留所有引用。移除技能前须先取消所有知识库（包括下架条目）对它的引用并逐一保存，否则返回 `409 SKILL_IN_USE`。技能文件按 `application/octet-stream` 上传，`name` 查询参数给出原始文件名，`X-Revision` 携带当前 revision。服务端只做字节级校验，不解压到磁盘、不执行任何内容：
 
 - 大小 ≤ 5 MiB，扩展名 `.zip` 或 `.md`；超限返回 `413 UPLOAD_TOO_LARGE`，非二进制请求返回 `415 BINARY_REQUIRED`。
 - `.md` 文件本身即 `SKILL.md`。
 - `.zip` 只读取中央目录，仅支持 stored 与 deflate；拒绝 zip64、加密、多卷、数据描述符缺少长度、重复条目名、绝对路径、`..`、反斜杠、符号链接位，以及超过 256 个条目或解压后超过 20 MiB。解压前按中央目录声明的长度限流，解压后核对长度与 CRC-32。
 - 压缩包中必须恰好有一个 `SKILL.md`，位于根目录或唯一的一级目录内；位于目录中时目录名必须等于 frontmatter 的 `name`。
-- `SKILL.md` 的 frontmatter 为 `---` 包裹的 YAML（拒绝重复键与别名），必须含小写连字符格式的 `name`（≤ 64）与非空 `description`（≤ 500）。`name` 写入 `catalog.skill.name`。技能文件是整个目录共用的一份：端侧绑定第一个知识库时安装，绑定更多知识库不重复安装，解除最后一个绑定时移除。
+- `SKILL.md` 的 frontmatter 为 `---` 包裹的 YAML（拒绝重复键与别名），必须含小写连字符格式的 `name`（≤ 64）与非空 `description`（≤ 500）。`name` 写入 `catalog.skills[].name`，是知识库引用和替换技能的稳定标识；上传文件名不是这个标识。
 - 校验通过后按内容 SHA-256 落盘为 `skills/<sha256>.<zip|md>`；已存在同哈希文件时直接复用，不重写。
 
-错误码：`INVALID_KNOWLEDGE` 400、`KNOWLEDGE_NOT_FOUND` 404、`KNOWLEDGE_ID_TAKEN` 409、`TENANT_ID_TAKEN` 409、`KNOWLEDGE_LIMIT` 409、`INVALID_SKILL_FILE` 400、`SKILL_NOT_FOUND` 404、`REVISION_CONFLICT` 409。详见 [ADR 0018](docs/adr/0018-metric-knowledge-catalog.md)。
+错误码：`INVALID_KNOWLEDGE` 400、`KNOWLEDGE_NOT_FOUND` 404、`KNOWLEDGE_ID_TAKEN` 409、`TENANT_ID_TAKEN` 409、`KNOWLEDGE_LIMIT` 409、`INVALID_SKILL_FILE` 400、`INVALID_SKILL_REFERENCE` 400、`SKILL_NOT_FOUND` 404、`SKILL_IN_USE` 409、`KNOWLEDGE_SKILL_LIMIT` 409、`SKILL_SELECTION_REQUIRED` 400、`INVALID_WORKFLOW_NAME` 400、`LEGACY_SKILL_UNRESOLVED` 503、`LEGACY_SKILL_ALREADY_CONFIGURED` 409、`KNOWLEDGE_CATALOG_TOO_LARGE` 503、`REVISION_CONFLICT` 409。详见 [ADR 0018](docs/adr/0018-metric-knowledge-catalog.md) 与[知识库维护流程](docs/runbooks/website-guide-maintenance.md#知识库与技能维护)。
 
 ## 专家分发（云端专家）
 

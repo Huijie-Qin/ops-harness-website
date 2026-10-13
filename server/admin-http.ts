@@ -7,9 +7,12 @@ import type { KnowledgeStore } from './knowledge-store.js'
 import { parseReleaseManifest } from './release-manifest.js'
 import type { ExpertStore } from './expert-store.js'
 import { handleExpertAdmin } from './expert-http.js'
+import type { VideoStore } from './videos-store.js'
+import { handleVideoAdmin } from './videos-http.js'
 
-export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync, knowledge?: KnowledgeStore, experts?: ExpertStore): AdminHandler {
+export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sync?: ContentSync, knowledge?: KnowledgeStore, experts?: ExpertStore, videos?: VideoStore): AdminHandler {
   return async (req, res, url, { json, method, body }) => {
+    if (videos && await handleVideoAdmin(videos, req, res, url, { json, method, body })) return true
     if (experts && await handleExpertAdmin(experts, req, res, url, { json, method, body })) return true
     if (url.pathname === '/api/admin/knowledge' || url.pathname.startsWith('/api/admin/knowledge/')) {
       if (!knowledge) throw new GuideError('CONTENT_UNAVAILABLE', 503)
@@ -19,12 +22,22 @@ export function createAdminHandler(releases: ReleaseAdmin, media: MediaStore, sy
         else { const data = await body(req); json(res, await knowledge.create(data.entry, data.revision)) }
         return true
       }
-      if (url.pathname === '/api/admin/knowledge/skill') {
-        // One companion Skill for the whole catalog.
-        method(req, ['POST', 'DELETE'])
+      if (url.pathname === '/api/admin/knowledge/compatibility') {
+        method(req, ['PUT'])
+        const data = await body(req)
+        json(res, await knowledge.resolveLegacySkill(data.legacy_skill_name, data.revision)); return true
+      }
+      if (url.pathname === '/api/admin/knowledge/skill' || url.pathname === '/api/admin/knowledge/skills') {
+        method(req, url.pathname.endsWith('/skills') ? ['POST'] : ['POST', 'DELETE'])
         json(res, req.method === 'POST'
           ? await knowledge.attachSkill(url.searchParams.get('name') ?? '', req, req.headers['x-revision'])
           : await knowledge.detachSkill((await body(req)).revision))
+        return true
+      }
+      const skillTarget = /^\/api\/admin\/knowledge\/skills\/([^/]+)$/.exec(url.pathname)
+      if (skillTarget) {
+        method(req, ['DELETE'])
+        json(res, await knowledge.detachSkill((await body(req)).revision, decodeURIComponent(skillTarget[1]!)))
         return true
       }
       const target = /^\/api\/admin\/knowledge\/([^/]+)$/.exec(url.pathname)
