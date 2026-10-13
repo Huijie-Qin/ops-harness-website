@@ -1,0 +1,248 @@
+/* Homepage-only styling keeps the guide, releases and administration unchanged. */
+.download-section.home-download {
+  color: #f0f1ef;
+  background: #080f17;
+  border-top: 1px solid #a6b2c129;
+  border-bottom: 0;
+  padding: 132px 0 100px;
+  text-align: left;
+  scroll-margin-top: 0;
+}
+
+.home-download > .container {
+  width: min(1280px, 90vw);
+  max-width: none;
+  padding: 0;
+}
+
+.home-download .eyebrow {
+  color: #a6b2c1;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: .16em;
+}
+
+.download-section.home-download h2 {
+  max-width: 1000px;
+  margin: 24px 0 22px;
+  font-size: clamp(34px, 4.3vw, 62px);
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -.04em;
+  text-wrap: balance;
+}
+
+.home-download .section-subtitle {
+  color: #a6b2c1;
+  font-size: 15px;
+  line-height: 1.8;
+  margin-bottom: 0;
+}
+
+.home-download .download-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  max-width: none;
+  margin: 60px 0 30px;
+}
+
+.home-download .download-card {
+  align-items: flex-start;
+  padding: 44px;
+  border: 1px solid #a6b2c130;
+  border-radius: 12px;
+  background: #0d151f;
+  min-width: 0;
+}
+
+.home-download .download-card > svg {
+  color: #d4dce4;
+  margin-bottom: 30px;
+}
+
+.home-download .download-card h3 {
+  color: #f0f1ef;
+  font-size: 34px;
+  font-weight: 500;
+  letter-spacing: -.025em;
+  line-height: 1.25;
+  margin: 0 0 12px;
+}
+
+.home-download .download-card p {
+  color: #a6b2c1;
+  font-size: 14px;
+  margin-bottom: 34px;
+}
+
+.home-download .download-card .button {
+  min-height: 54px;
+  max-width: none;
+  width: 100%;
+  border-radius: 7px;
+  font-size: 14px;
+  box-shadow: none;
+}
+
+.home-download .button.primary {
+  color: #101822;
+  background: #f0f1ef;
+  border-color: #f0f1ef;
+}
+
+.home-download .button.primary:hover {
+  color: #080f17;
+  background: #fff;
+  border-color: #fff;
+}
+
+.home-download .button.disabled {
+  color: #a6b2c1;
+  background: #ffffff05;
+  border-color: #a6b2c12e;
+}
+
+.home-download .download-card small {
+  color: #a6b2c1;
+  font-size: 12px;
+  line-height: 1.7;
+  margin-top: 17px;
+  overflow-wrap: anywhere;
+}
+
+.home-download .text-link {
+  color: #d5dee8;
+  font-weight: 400;
+}
+
+.home-download .portable {
+  margin-top: 19px;
+  font-size: 13px;
+}
+
+.home-download .release-link {
+  min-height: 44px;
+  font-size: 14px;
+  gap: 12px;
+}
+
+.home-download .notice {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin: 28px 0 0;
+  padding: 18px 20px;
+  border: 1px solid #bba17c55;
+  border-radius: 8px;
+  color: #e0d0ba;
+  background: #211d18;
+}
+
+.home-download .text-button {
+  color: #f0f1ef;
+  min-height: 30px;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.home-download .loading-text {
+  color: #a6b2c1;
+  margin: 28px 0 0;
+}
+
+.home-download a:focus-visible,
+.home-download button:focus-visible,
+.home-footer a:focus-visible {
+  outline: 2px solid #f0f1ef;
+  outline-offset: 5px;
+}
+
+.site-footer.home-footer {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 54px max(5vw, calc((100vw - 1280px) / 2)) 34px;
+  border-top: 1px solid #a6b2c129;
+  color: #f0f1ef;
+  background: #080f17;
+}
+
+.site-footer.home-footer .brand {
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.site-footer.home-footer p {
+  color: #a6b2c1;
+  font-size: 12px;
+  margin: 16px 0 40px;
+}
+
+.site-footer.home-footer > div {
+  color: #a6b2c1;
+  border-color: #a6b2c129;
+  padding-top: 25px;
+  gap: 26px;
+  font-size: 12px;
+}
+
+.site-footer.home-footer > div span {
+  color: #a6b2c1;
+}
+
+.site-footer.home-footer > div a:hover {
+  color: #f0f1ef;
+}
+
+@media (max-width: 700px) {
+  .download-section.home-download {
+    padding: 78px 0 64px;
+  }
+
+  .download-section.home-download h2 {
+    max-width: 520px;
+    font-size: clamp(32px, 7vw, 43px);
+    margin: 22px 0 20px;
+  }
+
+  .home-download .section-subtitle {
+    font-size: 13px;
+  }
+
+  .home-download .download-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    margin-top: 38px;
+  }
+
+  .home-download .download-card {
+    padding: 30px;
+  }
+
+  .home-download .download-card > svg {
+    margin-bottom: 24px;
+  }
+
+  .home-download .download-card h3 {
+    font-size: 30px;
+  }
+
+  .home-download .download-card p {
+    font-size: 13px;
+    margin-bottom: 28px;
+  }
+
+  .site-footer.home-footer {
+    padding-top: 40px;
+    padding-bottom: 28px;
+  }
+
+  .site-footer.home-footer > div {
+    flex-wrap: wrap;
+    gap: 18px 24px;
+  }
+
+  .site-footer.home-footer > div span {
+    width: 100%;
+    margin-left: 0;
+  }
+}
