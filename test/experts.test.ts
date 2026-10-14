@@ -165,6 +165,30 @@ test('drafts are validated, published immutably and versioned', async t => {
   assert.deepEqual(await readdir(path.join(f.content, 'experts', 'versions', 'push-ops')), ['1.json'])
 })
 
+test('DataOps is offered as a built-in tool and its optional reference survives saving and publishing', async t => {
+  const f = await fixture(t)
+  const options = await fetch(f.origin + '/api/admin/experts/options', { headers: f.headers })
+  assert.equal(options.status, 200)
+  const availableTools = (await options.json()).tools
+  assert.deepEqual(availableTools.find((tool: { id: string }) => tool.id === 'data-agent-tool'), { id: 'data-agent-tool', name: 'DataAgent连接器' })
+  assert.deepEqual(availableTools.find((tool: { id: string }) => tool.id === 'dataops-tool'), { id: 'dataops-tool', name: 'DataOps连接器' })
+
+  const created = await f.json('/api/admin/experts', { id: 'dataops-ops', draft: draft(), revision: (await f.list()).revision })
+  assert.equal(created.status, 200)
+  const tools = [{ toolId: 'dataops-tool', required: false }]
+  const saved = await f.json('/api/admin/experts/dataops-ops', { draft: draft({ tools }), revision: (await created.json()).revision }, 'PUT')
+  assert.equal(saved.status, 200)
+  const savedBody = await saved.json()
+  assert.deepEqual(savedBody.expert.draft.tools, tools)
+  const published = await f.json('/api/admin/experts/dataops-ops/publish', { revision: savedBody.revision })
+  assert.equal(published.status, 200)
+  const snapshot = JSON.parse(await readFile(path.join(f.content, 'experts', 'versions', 'dataops-ops', '1.json'), 'utf8'))
+  assert.deepEqual(snapshot.content.tools, tools)
+  const catalog = await f.catalog(owner.employeeId)
+  assert.equal(catalog.status, 200)
+  assert.deepEqual((await catalog.json()).experts[0].tools, tools)
+})
+
 test('the catalog and downloads only reach visible employees', async t => {
   const f = await fixture(t)
   await createPublished(f)
@@ -251,6 +275,24 @@ test('an expert package imports as a draft and matches its origin on re-import',
   assert.equal(updated.published.version, 1)
   assert.equal(updated.draftChanged, true)
   assert.match(updated.draft.responsibility, /新版职责/)
+})
+
+test('a package with required DataOps previews as known and retains its built-in reference after import', async t => {
+  const f = await fixture(t)
+  const tools = [{ toolId: 'dataops-tool', required: true }]
+  const uploaded = await f.upload('/api/admin/experts/import', expertPackage({ definition: { tools } }))
+  assert.equal(uploaded.status, 200)
+  const { preview } = await uploaded.json()
+  assert.deepEqual(preview.tools, [{ toolId: 'dataops-tool', name: 'DataOps连接器', required: true, known: true }])
+  assert.deepEqual(preview.errors, [])
+  const applied = await f.json(`/api/admin/experts/import/${preview.importId}/apply`, { target: { mode: 'create', id: 'dataops-ops' }, publish: true, revision: (await f.list()).revision })
+  assert.equal(applied.status, 200)
+  const expert = (await applied.json()).expert
+  assert.deepEqual(expert.draft.tools, tools)
+  assert.equal(expert.published.version, 1)
+  const catalog = await f.catalog(owner.employeeId)
+  assert.equal(catalog.status, 200)
+  assert.deepEqual((await catalog.json()).experts[0].tools, tools)
 })
 
 test('tampered, foreign or unsupported packages are rejected with reasons', async t => {

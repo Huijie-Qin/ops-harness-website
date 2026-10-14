@@ -202,7 +202,7 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 写入使用 `knowledge/.knowledge-lock` 互斥锁与同目录临时文件 + rename。`revision` 是 `catalog.json` 规范化内容的 SHA-256，不写进文件本身；所有写接口必须携带当前 `revision`，不一致返回 `409 REVISION_CONFLICT`。条目上限 500，`id` 创建后不可修改，`tenant_id` 在目录内唯一；`id` 省略时由服务端生成 `metrics-` + 10 位十六进制。`catalog.skills` 最多保存 100 个名称唯一的技能，各条目的 `skill_name: string | null` 引用其中一个名称；同一个技能可以被多个知识库复用。替换同名技能保留引用，删除知识库不删除技能；替换或移除技能后旧文件仍按哈希保留在 `skills/`。
 
-读取旧 `schemaVersion: 1` 目录时，顶层 `skill` 转换为 `skills` 数组，所有旧知识库自动以 `skill_name` 引用原公共技能；没有公共技能时为 `null`。`legacy_skill_name` 固定记录原公共技能身份，同名文件更新后新旧端都获取其当前版本。旧条目级 `skill` 继续忽略。读取不改写磁盘，首次成功写入前备份原目录，再原子保存 v2；升级前仍需完整备份整个 `knowledge/`，升级后重新读取 revision。
+读取旧 `schemaVersion: 1` 目录时，顶层 `skill` 转换为 `skills` 数组，所有旧知识库自动以 `skill_name` 引用原公共技能；没有公共技能时为 `null`。`legacy_skill_name` 记录原公共技能身份，同名文件更新后新旧端都获取其当前版本；管理员移除该技能时清为 `null`。旧条目级 `skill` 继续忽略。读取不改写磁盘，首次成功写入前备份原目录，再原子保存 v2；升级前仍需完整备份整个 `knowledge/`，升级后重新读取 revision。
 
 未发布中间版本的 `skill_names`：零项转为 `null`，一项转为该名称，多项完整保存在 `pending_skill_names` 并在管理页提示选择一个，明确保存前不公开该条目。缺失原公共技能身份时从有效 v1 备份恢复，找不到则在管理页明确选择一次，绝不使用技能数组首项；未确认时旧接口返回 `503 LEGACY_SKILL_UNRESOLVED`，新版接口仍可用。`PUT /api/admin/knowledge/compatibility` 携带 `legacy_skill_name` 和 `revision` 完成该一次性确认。
 
@@ -254,11 +254,11 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 `GET /api/knowledge/metrics/skill` 按 `legacy_skill_name` 下载当前公共技能，增加技能不影响该路径。按名称下载 `/api/knowledge/metrics/skills/:name` 继续可用。二者为 `no-store` + 内容哈希 ETag。新客户端使用 `/api/knowledge/metrics/v2/skills/:name/:sha256`，文件内容与名称双重校验，使用 `public, max-age=31536000, immutable`，同名替换后旧哈希仍可下载。所有下载带 `X-Skill-Name` 和 `X-Skill-Sha256`，未知名称或版本返回 404。旧无哈希地址保留既有跨请求上传竞态，客户端应继续校验并刷新重试，不为此冻结当前配置。
 
-旧单数上传 `POST /api/admin/knowledge/skill` 保留为上传别名。移除技能仍执行引用检查，原公共技能身份也视为占用，不能删除；需更新时同名上传即可。
+旧单数上传 `POST /api/admin/knowledge/skill` 保留为上传别名。原公共技能与其他技能一样，解除所有知识库引用后即可移除。移除原公共技能时，同一写入事务将 `legacy_skill_name` 清为 `null`；旧目录正常返回且不再包含顶层 `skill`，旧 `/api/knowledge/metrics/skill` 下载返回 `404 SKILL_NOT_FOUND`。其他技能不会自动成为公共技能，重新上传原名称也不会自动恢复该身份；历史哈希文件仍保留。
 
 ### 管理流程与技能文件规则
 
-新建或编辑条目后保存即生效，无需发布步骤；“上架”开关控制是否出现在公开目录。先在技能区上传所需文件，再在每个知识库内选择引用并保存。上传不同技能名会增加技能；相同 frontmatter 名称会替换原技能文件并保留所有引用。移除技能前须先取消所有知识库（包括下架条目）对它的引用并逐一保存，否则返回 `409 SKILL_IN_USE`。技能文件按 `application/octet-stream` 上传，`name` 查询参数给出原始文件名，`X-Revision` 携带当前 revision。服务端只做字节级校验，不解压到磁盘、不执行任何内容：
+新建或编辑条目后保存即生效，无需发布步骤；“上架”开关控制是否出现在公开目录。先在技能区上传所需文件，再在每个知识库内选择引用并保存。上传不同技能名会增加技能；相同 frontmatter 名称会替换原技能文件并保留所有引用。移除技能前须先取消所有知识库（包括下架条目及 `pending_skill_names` 中待单选的引用）对它的引用并逐一保存，否则返回 `409 SKILL_IN_USE`。技能文件按 `application/octet-stream` 上传，`name` 查询参数给出原始文件名，`X-Revision` 携带当前 revision。服务端只做字节级校验，不解压到磁盘、不执行任何内容：
 
 - 大小 ≤ 5 MiB，扩展名 `.zip` 或 `.md`；超限返回 `413 UPLOAD_TOO_LARGE`，非二进制请求返回 `415 BINARY_REQUIRED`。
 - `.md` 文件本身即 `SKILL.md`。
