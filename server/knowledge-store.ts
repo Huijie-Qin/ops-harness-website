@@ -414,9 +414,11 @@ export class KnowledgeStore {
     if (name !== undefined) parse(SkillNameSchema, name)
     return this.change(expected, async current => {
       const skill = this.selectSkill(current, name)
-      if (current.legacy_skill_name === skill.name || current.items.some(item => item.skill_name === skill.name || item.pending_skill_names?.includes(skill.name))) return fail('SKILL_IN_USE', 409)
-      const document = await this.commit(current.items, current.skills.filter(item => item.name !== skill.name), true, current.legacy_skill_name)
-      return { revision: document.revision, updatedAt: document.updatedAt }
+      if (current.items.some(item => item.skill_name === skill.name || item.pending_skill_names?.includes(skill.name))) return fail('SKILL_IN_USE', 409)
+      // An explicit null clears the old download target without recovering it from a migration backup.
+      const legacySkillName = current.legacy_skill_name === skill.name ? null : current.legacy_skill_name
+      const document = await this.commit(current.items, current.skills.filter(item => item.name !== skill.name), true, legacySkillName)
+      return { revision: document.revision, updatedAt: document.updatedAt, legacy_skill_name: document.legacy_skill_name }
     })
   }
   async openSkillVersion(name: string, sha256: string) {

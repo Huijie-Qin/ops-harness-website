@@ -202,10 +202,11 @@ async function send(event: Event) {
   })
 }
 function detach(value: MetricKnowledgeSkill) {
-  if (busy.value || dirty.value || skillUsers(value.name).length || legacySkillName.value === value.name) return
-  confirmation.value = { title: '移除这个技能？', message: `${value.name} · ${value.file_name}。移除后知识库将无法选择引用它；已上传的文件按内容哈希保留。`, label: '移除技能', action: () => void run(async () => {
-    const result = await call<{ revision: string }>(`/api/admin/knowledge/skills/${encodeURIComponent(value.name)}`, { method: 'DELETE', data: { revision: revision.value } })
-    revision.value = result.revision; skills.value = skills.value.filter(skill => skill.name !== value.name); notice.value = `技能“${value.name}”已移除。`
+  if (busy.value || dirty.value || skillUsers(value.name).length) return
+  const legacyNotice = legacySkillName.value === value.name ? '旧客户端公共技能也将清空，不会自动改用其他技能。' : ''
+  confirmation.value = { title: '移除这个技能？', message: `${value.name} · ${value.file_name}。移除后知识库将无法选择引用它；已上传的文件按内容哈希保留。${legacyNotice}`, label: '移除技能', action: () => void run(async () => {
+    const result = await call<{ revision: string; legacy_skill_name?: string | null }>(`/api/admin/knowledge/skills/${encodeURIComponent(value.name)}`, { method: 'DELETE', data: { revision: revision.value } })
+    revision.value = result.revision; legacySkillName.value = result.legacy_skill_name; skills.value = skills.value.filter(skill => skill.name !== value.name); notice.value = `技能“${value.name}”已移除。`
   }) }
 }
 function compatibility(entry: MetricKnowledgeEntry) {
@@ -258,7 +259,7 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
         </div>
       </div>
       <p class="editor-help">ZIP 须恰好包含一个 SKILL.md，位于根目录或与技能同名的唯一一级目录内；文件须包含 name 和 description。被知识库引用的技能须先解除引用并保存，才可移除，下架的知识库也计入引用。</p>
-      <p v-if="legacySkillName !== undefined" class="editor-help">旧客户端公共技能：{{ legacySkillName ?? '原来未配置技能' }}。此身份固定，同名上传会更新两端使用的文件。</p>
+      <p v-if="legacySkillName !== undefined" class="editor-help">旧客户端公共技能：{{ legacySkillName ?? '未配置技能' }}。<template v-if="legacySkillName">同名上传会更新两端使用的文件；无知识库引用时可移除，移除后公共技能将清空。</template></p>
       <fieldset v-else class="legacy-choice"><legend>确认原公共技能</legend><p class="editor-help">旧数据未记录原公共技能，且备份中无法确认。请按原配置选择一次；确认前旧客户端下载暂不可用，新版不受影响。</p><label class="check-label"><input v-model="legacyChoice" type="radio" name="legacy-skill" :value="null" :disabled="busy" />原来未配置技能</label><label v-for="skill in skills" :key="skill.name" class="check-label"><input v-model="legacyChoice" type="radio" name="legacy-skill" :value="skill.name" :disabled="busy" />{{ skill.name }}</label><button class="button secondary" :disabled="busy || legacyChoice === undefined" @click="resolveLegacy">保存原公共技能</button></fieldset>
       <p v-if="dirty" class="editor-help">上传技能会保留当前表单修改；移除技能前请先保存表单。</p>
       <div v-if="uploadName" class="upload-progress" role="status"><span>{{ uploadIndex }} / {{ uploadTotal }} · {{ uploadName }}</span><progress :value="progress" max="100" :aria-label="`${uploadName} 上传进度`"></progress>{{ progress }}% · {{ progress === 100 ? '正在校验保存…' : '上传中' }}</div>
@@ -269,7 +270,7 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
         <div><strong>{{ skill.name }}</strong><small>{{ skill.file_name }} · {{ skill.kind === 'zip' ? '压缩包' : 'Markdown' }} · {{ size(skill.size) }} · {{ new Date(skill.uploaded_at).toLocaleString('zh-CN') }}</small><p class="editor-help">{{ skillUsers(skill.name).length ? `被 ${skillUsers(skill.name).length} 个知识库引用：${skillUsers(skill.name).map(item => `${item.tenant_name}${item.enabled ? '' : '（已下架）'}`).join('、')}` : '尚未被知识库引用' }}</p><details><summary>内容哈希 SHA-256</summary><code>{{ skill.sha256 }}</code></details></div>
         <div class="admin-actions skill-actions">
           <a :href="`/api/knowledge/metrics/v2/skills/${encodeURIComponent(skill.name)}/${skill.sha256}`" :download="skill.file_name" :aria-label="`下载技能 ${skill.name}`">下载</a>
-          <button :disabled="busy || dirty || skillUsers(skill.name).length > 0 || legacySkillName === skill.name" :aria-label="`移除技能 ${skill.name}`" @click="detach(skill)">移除</button>
+          <button :disabled="busy || dirty || skillUsers(skill.name).length > 0" :aria-label="`移除技能 ${skill.name}`" @click="detach(skill)">移除</button>
         </div>
       </article>
       <p v-if="!skills.length" class="editor-help">尚未上传技能。知识库可不引用技能，也可在上传后选择一个。</p>
