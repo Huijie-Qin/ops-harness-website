@@ -30,22 +30,28 @@ pnpm start
 
 ## 首页与使用指南
 
-- `client/HeroAtmosphere.vue`：参考 [DeepSeek Harness 官网](https://www.deepseek.com/harness/) 的蓝色光场与点阵空间感，自行实现 Canvas 动画。鼠标移动带动柔光、扩散涟漪与点阵视差/避让；支持暂停、系统减少动态效果偏好，以及离开可见区域/后台时停止刷新；不加载外部动画脚本。
-- `client/WorkspacePreview.vue` / `ProductShot.vue`：首页仅展示“目标 · 待办”，以今日重点、日程、邮件和行动建议为介绍重点，支持查看原图。展示图保存在 `public/assets/product/`，由开发与生产服务统一提供 `/assets/product/` 路径。工具市场、我的技能、我的专家暂不在首页介绍，其既有指南内容与配图保留。
+- `client/CinemaHero.vue` / `VideoDialog.vue`：首页使用电影感产品封面，点击“观看产品影片”后在弹窗播放管理员发布的首页主片。支持原生播放控件、加载重试、Escape / 点击遮罩关闭、焦点恢复与窄屏布局；打开弹窗前不加载视频。无主片时提供使用指南入口。封面 `cinema-hero.webp` 是根据已确认视觉稿制作的宣传美术图，不作为真实产品界面验收截图。
+- `client/CinemaAtmosphere.vue`：暗部光尘缓慢漂浮，响应鼠标的局部避让、柔光和主图微视差；文字及操作位置保持固定。底栏提供暂停按钮；打开影片、滚动离屏或切至后台时停止绘制。窄屏、粗指针及系统减少动态效果时使用静态效果；绘制上限 30 fps、DPR 上限 1.5，不引入动画依赖。
+- `client/HomeChapters.vue`：首屏下方按宣传片的“生产系统对接、技能市场与分发、模型资源池、办公协同”四章展开。每章用原生 Vue 界面重组三步场景，呈现输入、过程和结果；第一章可切换数据分析与内容合规。宽屏桌面滚动推进，也可直接点击步骤；窄屏、较矮窗口及系统减少动态效果时使用手动步骤，减少动态效果时关闭过渡。章节导航保留直接跳转及当前位置提示。
+- `DataFlowScene.vue`、`ProductionScene.vue`、`SkillFlowScene.vue`、`ModelScene.vue`、`CollaborationScene.vue`：使用真实文本、正式图标和分层面板重现宣传片的业务情节，场景状态由外层步骤控制，不整幅嵌入白底截图、不自动播放。演示区不连接生产系统、不执行安装、分发或发送通知等真实操作。首屏影片、管理后台与 `#download` 的真实 Release API 保持原有职责；下载区继续提供版本、大小、空态与错误重试。
 - `content/guide/*.md`：11 个独立 Markdown 章节，包含操作步骤、完成标志、示例与常见问题。更新功能时同步核对对应插件 README 和实际界面，不能将待接入能力描述为已经可用。
 - `client/GuidePage.vue`：全文搜索、分组目录、前后章导航和示例复制。支持章节链接及原有 `#step-1` 至 `#step-4` 链接。
 
 ### 管理员与 Markdown 维护
 
-管理员入口为 `/admin`。包含“文档编辑、目录与文档管理、发布包、图片库”四个区域。文档编辑页只编辑 Markdown 正文，提供文档选择、预览和正文历史恢复。目录与文档管理页以分组列表集中处理新建、名称与简介、移动、排序、隐藏及回收恢复，操作按钮直接显示。旧 `/guide/admin` 地址自动跳转到 `/admin`。完整操作、内容格式、部署凭据与备份方式见 [帮助文档维护手册](docs/runbooks/website-guide-maintenance.md)。选型比较见 [ADR 0012](docs/adr/0012-markdown-guide-administration.md)。
+管理员入口为 `/admin`。包含文档编辑、目录与文档管理、发布包、图片库、知识库、专家与新增的“视频内容”区域。视频内容支持产品宣传、特性使用、最佳实践分类，以及 MP4 上传、封面、预览、发布和设为首页主片；草稿视频只对管理员开放。文档编辑页只编辑 Markdown 正文，提供文档选择、预览和正文历史恢复。目录与文档管理页以分组列表集中处理新建、名称与简介、移动、排序、隐藏及回收恢复，操作按钮直接显示。旧 `/guide/admin` 地址自动跳转到 `/admin`。完整操作、内容格式、部署凭据与备份方式见 [帮助文档维护手册](docs/runbooks/website-guide-maintenance.md)。选型比较见 [ADR 0012](docs/adr/0012-markdown-guide-administration.md)，视频存储与发布边界见 [ADR 0025](docs/adr/0025-video-content.md)。
 
 `client/GuideAdmin.vue` / `MarkdownEditor.vue` 提供管理员登录、Vditor 编辑、阅读预览、版本历史与回收站。管理员密码通过环境提供，没有默认密码；未配置时编辑接口关闭，公开阅读不受影响。日常保存发布到 `.runtime/website-content`。管理员可明确点击“同步到 content”，核对清单后将修改过的文档、目录和图片写回源码，以便检查并提交到主仓；不会自动执行 Git 操作。
 
 编辑器仅在管理员页面加载，附属资源由 `scripts/prepare-assets.mjs` 从锁定的 npm 包复制到本站，生成目录不提交 Git。`scripts/copy-guide.mjs` 将 `content/guide`（包含 `navigation.json`）及 `content/media` 复制到生产构建中。图片继续使用 `/media/<sha256>.<ext>` 地址，在线目录没有该文件时读取构建中的图片。
 
-### 产品展示图维护
+### 产品场景与展示图维护
 
-首页 `goals-todos.jpg` 于 2026-09-17 使用产品仓库 `packages/features/my-todos/src/client.js` 的实际页面组件，在独立浏览器环境中注入固定示例数据后采集，尺寸为 1470 × 980。产品源码基线为 `128d494bb9a8114702ff131674efdf1b14228c2e`。页面标明“界面示例”，不读取真实账号、邮件、日程、会话或 Desktop 状态，不启动 DSH；官网运行不依赖产品源码或 React。当前介绍不承诺独立目标创建、关键结果或进度管理。
+当前首页三步场景依据用户附带的宣传视频 v3 重组，使用 Vue / CSS 呈现功能流程，不是实拍截图，也不作为当前账号、生产系统执行或默认安装状态的证据。视频为 3840 × 2160、30 fps、约 52 秒、110,298,764 字节；完整 SHA-256、原片情节与组件映射见 [场景来源说明](docs/qa/home-scenes/source.md)。复核以完整原片为准，包含 Skill Hunt 的完整字幕以及 WeLink 创建会议、通知两人的后续结果。视频文件不随代码提交。
+
+`public/assets/product/chapters/` 的五组 WebP 是上一轮静态图文方案的历史素材，当前三步场景不加载这些整幅图片。它们于 2026-10-12 从同一宣传片提取；来源片段依次为六类专家 24.5s、总编室对接 21.5s、Skill Hunt 29.4s、模型资源池 38s、办公协同 43.3s，每组保留 1800px / 900px 两种宽度，十张合计约 881 KB。旧验收截图与指南配图继续保留，不能据旧裁切画面推断原片的全部文案或操作流程。
+
+保留的历史素材 `goals-todos.jpg` 于 2026-09-17 使用产品仓库 `packages/features/my-todos/src/client.js` 的实际页面组件，在独立浏览器环境中注入固定示例数据后采集，尺寸为 1470 × 980。产品源码基线为 `128d494bb9a8114702ff131674efdf1b14228c2e`。页面标明“界面示例”，不读取真实账号、邮件、日程、会话或 Desktop 状态，不启动 DSH；官网运行不依赖产品源码或 React。当前介绍不承诺独立目标创建、关键结果或进度管理。
 
 指南保留的三张 JPEG 于 2026-09-13 从产品仓库 ops-harness 完成 `pnpm local:bootstrap` 后的真实 Web Runtime 采集；源码基线为 `c75716f`，Profile 为 `web`，运行数据位于仓库 `.runtime/dsh-home`，访问地址为 `http://127.0.0.1:3081/`。图片尺寸均为 1470 × 746。
 
@@ -88,6 +94,8 @@ pnpm start
 
 已发布版本可修改标题、更新说明、上下架状态；安装包不可覆盖。草稿及其文件可移至本地回收目录。发布瞬间参与当前自动更新策略，网页新版本默认立即发布、100% 灰度；更细的发布时间、最低版本与灰度策略继续使用 CLI/受控目录维护。
 
+版本类型由 SemVer 自动识别，页面与发布确认显示正式版、Beta 测试版、RC 候选版或其他预览版。新版客户端的正式版频道只接收正式版；测试版频道同时接收正式版、`-beta` 和 `-rc` 首段的版本，排除 `-alpha`、`-dev` 等其他预览版。发布确认会列出新客户端的更新受众，并提示旧客户端只接收正式版；官网更新页仍允许手动下载全部已上架且已到发布时间的版本，首页默认下载只提供正式版。详见 [ADR 0024](docs/adr/0024-desktop-update-channels.md)。
+
 先按 Desktop 文档在目标平台生成安装包。Windows 必须是 NSIS EXE（自动升级），可附 portable ZIP（手工下载）；macOS arm64 必须包含 ZIP（自动升级），可附 DMG（手工安装）。不支持同版本覆盖，应递增产品仓库的 `apps/desktop/package.json` 的版本重新构建。
 
 也可以使用原有命令行流程：创建一份发布说明 JSON，例如 `content/release-notes.example.json`。从仓库根目录运行：
@@ -98,7 +106,7 @@ pnpm release --version 0.2.0 --platform windows-x64 --input /path/to/desktop-art
 pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac-artifacts --notes content/release-notes.example.json --rollout 100
 ```
 
-**CLI 的 `--input`、`--notes`、`--config` 相对路径基于本官网仓库根目录**；可使用绝对路径。`--config /path/to/website.json` 指定完整官网配置，优先于 `DSH_OPS_WEBSITE_CONFIG`；两者都未指定时使用 `config/website.json`。发布 CLI 不需要管理员密码。示例版本必须与真实产物版本一致，不会自动改写应用版本。文件名需包含独立的版本片段；Windows portable ZIP 还需包含 `x64`，macOS 文件名需包含 `arm64`，与当前构建命名一致。混合输入目录按平台筛选。发布工具自动计算大小和 SHA-512，不信任手填哈希。
+**CLI 的 `--input`、`--notes`、`--config` 相对路径基于本官网仓库根目录**；可使用绝对路径。`--config /path/to/website.json` 指定完整官网配置，优先于 `DSH_OPS_WEBSITE_CONFIG`；两者都未指定时使用 `config/website.json`。发布 CLI 不需要管理员密码。示例版本必须与真实产物版本一致，不会自动改写应用版本。文件名按完整版本和构建尾缀匹配：NSIS 为 `<product> Setup <version>.exe`，Windows portable ZIP 为 `<product>-<version>-portable-x64.zip`，macOS 为 `<product>-<version>-arm64.zip/.dmg`，保留对应 blockmap 命名；带 x64 尾缀的 EXE 也兼容。混合输入目录按完整版本和平台筛选，`0.3.0` 不会匹配 `0.3.0-beta.1`，`beta.1` 不会匹配 `beta.10`。发布工具自动计算大小和 SHA-512，不信任手填哈希；这不检查安装包内部的版本字段。
 
 工具会取得独占发布锁、复制产物到临时目录、计算哈希、验证契约，先提交不可变的 `archive/<version>/<platform>/`，再原子替换 `catalog.json`。同版两个平台共享完全相同的标题与说明。失败不会宣告发布成功；进程崩溃后的 `.publish.lock` 和孤立归档需由发布人员确认没有其他发布进程后检查处理，不自动删除。禁止直接覆盖归档内的文件。
 
@@ -116,7 +124,7 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 
 `catalog.json` 使用 `@dsh-ops/release-contract` 的严格 schema。每版可配置 `enabled`、`rolloutPercentage`（0–100）、`minimumVersion`、`publishedAt`。策略变更应停止发布写入，校验整份目录后用同目录临时文件 + rename 替换；不要在服务读取时原地截断文件。目录损坏时 API 返回 503 并保留原文件。
 
-灰度只控制应用内升级；官网展示所有已启用且到达发布时间的版本并允许手动下载。稳定版不会升级到预览版；同版、低版、未启用、不匹配平台、未达到最低版本和不在灰度分组的安装实例都不会获得更新。灰度按安装 UUID + 版本 + 平台稳定分组，不记录设备、用户、会话或密钥。
+灰度只控制应用内升级；官网展示所有已启用且到达发布时间的版本并允许手动下载。新版客户端按保存的 `stable` / `beta` 选择筛选，不再根据当前版本推断频道；关闭测试版后不会降级，已有 Beta / RC 用户等待更高正式版。同版、低版、未启用、不匹配平台、未达到最低版本和不在灰度分组的安装实例都不会获得更新。灰度按安装 UUID + 版本 + 平台稳定分组，频道不加入哈希，不记录设备、用户、会话或密钥。
 
 ## 管理接口
 
@@ -128,6 +136,12 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 | GET/PUT /api/admin/navigation | 分组、章节顺序与隐藏配置 |
 | GET/POST /api/admin/images | 图片库及原始二进制上传（name 查询参数） |
 | GET/HEAD /media/:sha256.:ext | 受控图片公开读取 |
+| GET /api/videos | 已发布的视频目录 |
+| GET/HEAD /videos/:sha256.mp4 | 已发布视频流，支持 Range |
+| GET/POST /api/admin/videos | 视频目录 / 新建草稿 |
+| PUT/DELETE /api/admin/videos/:id | 更新、发布、下架、设为主片 / 移入回收目录，需 revision |
+| POST /api/admin/videos/:id/file?name=... | MP4 上传，最多 512 MiB，需 X-Revision；仅草稿可替换文件 |
+| GET/HEAD /api/admin/videos/:id/preview | 已登录管理员预览草稿或已发布视频 |
 | POST /api/admin/releases/manifest | 校验打包描述文件并预览版本、平台和文件清单（不创建草稿） |
 | GET/POST /api/admin/releases | 发布清单 / 用描述文件和更新说明新建草稿 |
 | PUT /api/admin/releases/drafts/:id/manifest | 为旧草稿补充描述文件并校验已有文件，需 revision |
@@ -145,10 +159,12 @@ pnpm release --version 0.2.0 --platform macos-arm64 --input /path/to/desktop-mac
 ## 公开 API
 
 ```http
-GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&currentVersion=0.1.0&platform=windows-x64
+GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&currentVersion=0.2.0&platform=windows-x64&channel=stable
 ```
 
 无更新：`{"schemaVersion":1,"updateAvailable":false}`。有更新返回 `version`、`platform`、固定版本的 `feedUrl`、`releaseNotesUrl`、`artifact: {name, size, sha512}`。协议由产品仓库的 `packages/shared/release-contract/src/index.ts` 维护，官网使用锁定的同包制品，见 [共享协议来源与更新](vendor/README.md)。
+
+`channel` 可选且仅允许 `stable` / `beta`；未知、空值、重复参数均返回 `400 INVALID_UPDATE_QUERY`。新版客户端必须显式传入用户选择。缺席时统一按 `stable` 处理，无论当前安装正式版还是预览版，都只接收更高正式版；旧三参数请求继续有效。响应与固定版本 feed 形状仍为 schemaVersion 1，继续使用 `latest.yml` / `latest-mac.yml`，不新增 `beta.yml`。部署先升级官网再发布新版客户端；新客户端不得在失败后省略 `channel` 静默回退。
 
 | 接口 | 用途 |
 | --- | --- |
@@ -228,6 +244,8 @@ GET /api/releases/check?installationId=123e4567-e89b-42d3-a456-426614174000&curr
 
 外层字段名沿用 snake_case。`knowledge_retrieve_workflow_id` 是名称到工作流 ID 的映射，允许空对象，最多 50 项；新增或改名的 key 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，拒绝 `run_code`、`__proto__`、`constructor`、`prototype`；value 最多 256 字符。名称和值去除首尾空白后不能为空，名称不能重复。历史已存名称仍可读取和原名保存，管理页提示无效方法名，不自动改名。客户端以 key 注册方法，以 value 调用工作流。
 
+`data_query_workflows` 是可选的字符串数组，列出被标注为“数据查询”的方法 key，表示该方法的结果是可以画成图表的数据；管理页每个工作流行有对应勾选。只接受同一条目 `knowledge_retrieve_workflow_id` 中存在且不重复的名称，保存时按工作流映射的顺序整理，为空则不出现该字段。新建省略视为没有标注；更新省略保留原标注（仅保留仍存在的方法，改名或移除方法时标注随之消失），显式 `[]` 清空。历史方法 `query_card_data` 不需要标注，客户端始终把它当作数据查询。该字段只在 v2 公开目录中输出，v1 投影显式剔除，旧客户端收到的字节与 ETag 不变；已安装的新客户端在用户同步该知识库后采用修改。
+
 `skill_name` 只能为已上传技能的一个名称或 `null`。新建省略时使用 `null`，更新省略时保留引用，显式 `null` 解除引用。其余长度上限：`tenant_name` 80、`tenant_id` 128、各 knowledge ID 256、`knowledge_description` 2000、`indicators_cover` / `reports_cover` / `update_frequency` 各 80、`typical_indicators` 最多 50 项且每项 80。类型定义在 [`shared/knowledge.ts`](shared/knowledge.ts)。
 
 原地址 `GET /api/knowledge/metrics` 始终返回 `schemaVersion: 1`，从同一份当前配置投影：只包含已上架、引用 `legacy_skill_name`（双方均无技能也允许）且三个固定工作流完整的知识库；新建且满足条件的库同样可见。每个条目移除单技能引用字段，仅保留 `get_card_index`、`get_card_meta`、`query_card_data` 并附同值 `quer_card_data` 别名；顶层 `skill` 为原公共技能的当前元数据。其他技能或自定义工作流库只供新版。迁移时旧拼写转为标准拼写，但两者同时存在且值不同时完整保留、管理页提示且不进入 v1；v2 不改写自定义 key。
@@ -290,7 +308,7 @@ pnpm check
 pnpm build
 ```
 
-运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.1 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
+运行时依赖：Vue 3.5.42（vuejs/core，MIT）、yaml 2.9.0（eemeli/yaml，ISC）、Vditor 4.0.0（Vanessa219/vditor，MIT）、markdown-it 15.0.2（markdown-it，MIT）、由产品仓库维护的 release-contract 0.1.3 制品。构建依赖：Vite 7.3.6 / @vitejs/plugin-vue 6.0.8（vitejs，MIT）、vue-tsc 3.3.11（vuejs/language-tools，MIT）、TypeScript 5.9.2（Microsoft，Apache-2.0）、tsx 4.23.12（privatenumber，MIT）。来源均为 npm；精确版本与完整传递依赖由 pnpm-lock.yaml 管理。Vite/esbuild 为开发构建依赖，不进入 Desktop 运行时。
 
 Windows x64 上的真实 Desktop 更新烟测由产品仓库执行：先在官网运行 `pnpm build`，再在产品仓库设置 `DSH_OPS_WEBSITE_PROJECT` 为官网的绝对路径并运行 `pnpm desktop:smoke:updates`。这只用于跨仓库集成验收，日常运行不需要该变量。
 
@@ -303,3 +321,5 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 运营统计环境：管理员页面通过 `/api/admin/analytics/context` 获取默认环境。`pnpm dev`（--dev）默认开发，`pnpm start` 默认生产；采集开关只由 trackingEnabled 控制；手动选择保留为当前浏览器 UI 偏好。数据均按所选环境查询，空表先核对环境、日期与版本筛选。匿名对话、Token、Skill 可查看次数；登录用户数、DAU/MAU 和排名直接按终端当前 WeLink 工号归属。
 
 运营统计支持“全部环境”，跨环境、跨平台的同一工号统一去重；页面不再提供平台筛选。没有工号的旧事件保留匿名，不补归当前登录者。
+
+WeLink 个人资料随事件上报后，用户明细、排名和操作明细显示姓名、工号与最小部门；悬浮或键盘聚焦部门可查看完整部门，个人详情另展示一级部门。资料按成功查询时间更新，旧客户端与离线补传不会清空或倒退已有资料。SQLite 自动升级至 v3；部署必须先升级并重启官网，再更新工作助手，详见运营统计部署手册。官网使用仅依赖 zod 的 `@dsh-ops/tracking-contract` 制品，不安装终端 tracking 插件。

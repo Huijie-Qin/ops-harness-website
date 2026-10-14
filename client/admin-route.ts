@@ -5,6 +5,7 @@ export const adminSections = [
   { id: 'documents', label: '目录与文档管理', icon: 'grid' },
   { id: 'releases', label: '发布包', icon: 'download' },
   { id: 'media', label: '图片库', icon: 'grid' },
+  { id: 'videos', label: '视频内容', icon: 'video' },
   { id: 'knowledge', label: '知识库', icon: 'book' },
   { id: 'experts', label: '专家分发', icon: 'person' },
   { id: 'analytics', label: '运营统计', icon: 'windows' },

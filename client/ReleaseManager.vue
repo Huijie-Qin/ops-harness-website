@@ -4,6 +4,8 @@ import type { ReleaseDraft, ManagedRelease, ReleaseManifest, ReleaseManifestArti
 import { maxManifestBytes, maxPackageBytes } from '../shared/admin'
 import { ApiError, guideApi, requestMessage, uploadFile } from './guide-api'
 import WebsiteDialog from './WebsiteDialog.vue'
+import ReleaseTypeBadge from './ReleaseTypeBadge.vue'
+import { releaseAudience, releaseAudienceDetail, releaseTypeLabel } from './release-display'
 
 const props = defineProps<{ csrf: string }>()
 const emit = defineEmits<{ error: [e: unknown]; dirty: [v: boolean]; busy: [v: boolean] }>()
@@ -18,6 +20,7 @@ const confirmation = ref<{ title: string; message: string; label?: string; actio
 const lifetime = new AbortController()
 let upload: AbortController | undefined
 const manifest = computed(() => creating.value ? pendingManifest.value : current.value?.manifest)
+const selectedVersion = computed(() => manifest.value?.version ?? current.value?.version ?? published.value?.version)
 const dirty = computed(() => Boolean(current.value || published.value || creating.value) &&
   (JSON.stringify(form.value) !== baseline.value || creating.value && !!pendingManifest.value))
 const mainUploaded = computed(() => current.value?.files.some(f => f.name.endsWith(current.value?.platform === 'windows-x64' ? '.exe' : '.zip')))
@@ -147,7 +150,7 @@ function discard() {
 function publish() {
   const d = current.value
   if (!d) return
-  confirmation.value = { title: `发布 ${d.version}？`, message: `${platformLabel(d.platform)} · ${d.files.length} 个文件。安装包已通过描述文件校验，发布前还会再次复核。确认后会出现在下载页并参与自动更新，发布后不可覆盖。`, label: '确认发布', action: () => void run(async () => {
+  confirmation.value = { title: `发布 ${d.version} · ${releaseTypeLabel(d.version)}？`, message: `${platformLabel(d.platform)} · ${d.files.length} 个文件。安装包已通过描述文件校验，发布前还会再次复核。确认后会出现在下载页，发布后不可覆盖。${releaseAudience(d.version)}${releaseAudienceDetail}`, label: '确认发布', action: () => void run(async () => {
     await call(`/api/admin/releases/drafts/${d.id}/publish`, { method: 'POST', data: { revision: d.revision }, timeout: 30 * 60 * 1000 })
     await list(); adopt(releases.value.find(r => r.version === d.version)!); notice.value = '发布成功，下载页和自动更新已更新。'
   }) }
@@ -189,9 +192,9 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
     <div class="admin-layout">
       <aside class="admin-sidebar release-sidebar">
         <h3>发布草稿</h3><p v-if="!drafts.length" class="editor-help">尚无草稿</p>
-        <nav aria-label="发布草稿"><button v-for="d in drafts" :key="d.id" :disabled="busy" :aria-current="current?.id === d.id ? 'page' : undefined" @click="guard(() => { adopt(d); error = ''; notice = '' })"><span>{{ d.version }} · {{ platformLabel(d.platform) }}</span><small>{{ d.published ? '已发布，可清理草稿' : !d.manifest ? '需补充描述文件' : `${d.files.length} 个文件 · 待发布` }}</small></button></nav>
+        <nav aria-label="发布草稿"><button v-for="d in drafts" :key="d.id" :disabled="busy" :aria-current="current?.id === d.id ? 'page' : undefined" @click="guard(() => { adopt(d); error = ''; notice = '' })"><span>{{ d.version }} · {{ platformLabel(d.platform) }}</span><ReleaseTypeBadge :version="d.version" /><small>{{ d.published ? '已发布，可清理草稿' : !d.manifest ? '需补充描述文件' : `${d.files.length} 个文件 · 待发布` }}</small></button></nav>
         <h3>已发布版本</h3><p v-if="!releases.length" class="editor-help">尚未发布版本</p>
-        <nav aria-label="已发布版本"><button v-for="r in releases" :key="r.version" :disabled="busy" :aria-current="published?.version === r.version ? 'page' : undefined" @click="guard(() => { adopt(r); error = ''; notice = '' })"><span>{{ r.version }} · {{ r.title }}</span><small>{{ r.enabled ? '已上架' : '已下架' }} · {{ new Date(r.publishedAt).toLocaleDateString() }}</small></button></nav>
+        <nav aria-label="已发布版本"><button v-for="r in releases" :key="r.version" :disabled="busy" :aria-current="published?.version === r.version ? 'page' : undefined" @click="guard(() => { adopt(r); error = ''; notice = '' })"><span>{{ r.version }} · {{ r.title }}</span><ReleaseTypeBadge :version="r.version" /><small>{{ r.enabled ? '已上架' : '已下架' }} · {{ new Date(r.publishedAt).toLocaleDateString() }}</small></button></nav>
       </aside>
       <section v-if="current || published || creating" class="admin-workspace release-workspace">
         <div class="editor-heading"><h3>{{ published ? '维护已发布版本' : current ? '发布草稿' : '创建发布草稿' }}</h3><span class="editor-help">{{ dirty ? '有未保存的修改' : creating ? '尚未创建' : '已保存' }}</span></div>
@@ -206,9 +209,11 @@ onBeforeUnmount(() => { lifetime.abort(); upload?.abort(); emit('dirty', false);
         <h3 v-if="current?.manifest" class="release-step-title">1. 描述文件已导入</h3>
         <div v-if="manifest || current || published" class="release-identity">
           <span><small>版本号</small><strong>{{ manifest?.version ?? current?.version ?? published?.version }}</strong></span>
+          <span v-if="selectedVersion"><small>版本类型</small><ReleaseTypeBadge :version="selectedVersion" /></span>
           <span v-if="manifest || current"><small>平台</small><strong>{{ platformLabel(manifest?.platform ?? current!.platform) }}</strong></span>
           <span v-if="manifest"><small>描述文件</small><strong>{{ manifest.name }}</strong></span>
         </div>
+        <p v-if="selectedVersion" class="release-audience"><strong>更新受众</strong><span>{{ releaseAudience(selectedVersion) }}{{ releaseAudienceDetail }}</span></p>
         <form v-if="manifest || current || published" @submit.prevent="saveClick">
           <fieldset :disabled="busy || current?.published">
             <h3 v-if="!published" class="release-step-title">2. 填写更新说明</h3>

@@ -536,3 +536,114 @@ test('a write exceeding the old 2 MiB response ceiling is rejected before changi
   assert.equal(await readFile(file, 'utf8'), before)
   assert.equal((await fetch(origin + '/api/knowledge/metrics')).status, 200)
 })
+
+const withMethods = (tags?: unknown, extra: Record<string, string> = {}) => entry({
+  knowledge_retrieve_workflow_id: { get_card_index: 'wf-index', get_card_meta: 'wf-meta', query_card_data: 'wf-data', ...extra },
+  ...(tags === undefined ? {} : { data_query_workflows: tags }),
+})
+
+test('methods annotated as data queries reach the v2 catalog only; the v1 response served to released clients is untouched', async t => {
+  const { json, read, origin, content } = await fixture(t)
+  const base = await read()
+  const plain = await (await json('/api/admin/knowledge', { entry: withMethods(undefined, { revenue_trend: 'wf-trend' }), revision: base.revision })).json()
+  assert.equal(Object.hasOwn(plain.entry, 'data_query_workflows'), false)
+  // A catalog nobody annotated keeps exactly the shape it always had on disk.
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(path.join(content, 'knowledge/catalog.json'), 'utf8')).items[0], 'data_query_workflows'), false)
+  const v1Before = (await (await fetch(origin + '/api/knowledge/metrics')).json()).items
+  assert.equal(v1Before.length, 1)
+  const id = plain.entry.id
+
+  // The editor lists them in another order than the method map: the stored order is the map's.
+  const tagged = await (await json(`/api/admin/knowledge/${id}`, { entry: withMethods(['revenue_trend', 'query_card_data'], { revenue_trend: 'wf-trend' }), revision: plain.revision }, 'PUT')).json()
+  assert.deepEqual(tagged.entry.data_query_workflows, ['query_card_data', 'revenue_trend'])
+  assert.deepEqual((await read()).items[0].data_query_workflows, ['query_card_data', 'revenue_trend'])
+  assert.deepEqual((await (await fetch(origin + '/api/knowledge/metrics/v2')).json()).items[0].data_query_workflows, ['query_card_data', 'revenue_trend'])
+
+  const v1After = await (await fetch(origin + '/api/knowledge/metrics')).json()
+  assert.equal(v1After.schemaVersion, 1)
+  // Only the save time may differ: same keys, same values, so a released client sees nothing new.
+  const untimed = (items: Array<Record<string, unknown>>) => items.map(({ updated_at: _saved, ...rest }) => rest)
+  assert.deepEqual(untimed(v1After.items), untimed(v1Before))
+  assert.deepEqual(Object.keys(v1After.items[0]), Object.keys(v1Before[0]))
+  assert.equal(Object.hasOwn(v1After.items[0], 'data_query_workflows'), false)
+  assert.equal(v1After.items[0].knowledge_retrieve_workflow_id.revenue_trend, undefined)
+
+  // Clearing the list removes the key again instead of leaving an empty array behind.
+  const cleared = await (await json(`/api/admin/knowledge/${id}`, { entry: withMethods([], { revenue_trend: 'wf-trend' }), revision: tagged.revision }, 'PUT')).json()
+  assert.equal(Object.hasOwn(cleared.entry, 'data_query_workflows'), false)
+  assert.equal(Object.hasOwn((await (await fetch(origin + '/api/knowledge/metrics/v2')).json()).items[0], 'data_query_workflows'), false)
+})
+
+test('an annotation must name a method of the same entry once; malformed lists are rejected without writing', async t => {
+  const { json, read, content } = await fixture(t)
+  const base = await read()
+  const created = await (await json('/api/admin/knowledge', { entry: withMethods(['query_card_data']), revision: base.revision })).json()
+  const before = await readFile(path.join(content, 'knowledge/catalog.json'), 'utf8')
+  const id = created.entry.id
+  for (const [tags, code] of [
+    [['no_such_method'], 'INVALID_DATA_QUERY_WORKFLOW'],
+    [['get_card_index', 'get_card_index'], 'INVALID_DATA_QUERY_WORKFLOW'],
+    [['query_card_data', ' query_card_data '], 'INVALID_DATA_QUERY_WORKFLOW'],
+    ['query_card_data', 'INVALID_KNOWLEDGE'],
+    [[''], 'INVALID_KNOWLEDGE'],
+    [[7], 'INVALID_KNOWLEDGE'],
+    [{ query_card_data: true }, 'INVALID_KNOWLEDGE'],
+    [Array.from({ length: maxKnowledgeWorkflows + 1 }, (_, index) => `m${index}`), 'INVALID_KNOWLEDGE'],
+  ] as const) {
+    for (const [url, method] of [['/api/admin/knowledge', 'POST'], [`/api/admin/knowledge/${id}`, 'PUT']] as const) {
+      const current = await read()
+      const rejected = await json(url, { entry: method === 'POST' ? { ...withMethods(tags), id: 'metrics-other', tenant_id: 'tenant-other' } : withMethods(tags), revision: current.revision }, method)
+      assert.equal(rejected.status, 400, JSON.stringify(tags)); assert.equal((await rejected.json()).error, code, JSON.stringify(tags))
+    }
+  }
+  assert.equal(await readFile(path.join(content, 'knowledge/catalog.json'), 'utf8'), before)
+})
+
+test('an editor that does not send the field keeps the annotations of methods that still exist; an empty list clears them', async t => {
+  const { json, read } = await fixture(t)
+  const base = await read()
+  const extra = { revenue_trend: 'wf-trend', orders: 'wf-orders' }
+  let current = await (await json('/api/admin/knowledge', { entry: withMethods(['revenue_trend', 'orders'], extra), revision: base.revision })).json()
+  const id = current.entry.id
+  assert.deepEqual(current.entry.data_query_workflows, ['revenue_trend', 'orders'])
+  // A script that predates the field edits the description only.
+  const legacyEditor = withMethods(undefined, extra); legacyEditor.knowledge_base_meta.knowledge_description = '只改描述'
+  current = await (await json(`/api/admin/knowledge/${id}`, { entry: legacyEditor, revision: current.revision }, 'PUT')).json()
+  assert.deepEqual(current.entry.data_query_workflows, ['revenue_trend', 'orders'])
+  // It also removes one method: the annotation goes with it instead of dangling.
+  current = await (await json(`/api/admin/knowledge/${id}`, { entry: withMethods(undefined, { revenue_trend: 'wf-trend' }), revision: current.revision }, 'PUT')).json()
+  assert.deepEqual(current.entry.data_query_workflows, ['revenue_trend'])
+  // Renaming a method through such an editor is a removal plus an addition: the old annotation does not follow the name.
+  current = await (await json(`/api/admin/knowledge/${id}`, { entry: withMethods(undefined, { revenue_report: 'wf-trend' }), revision: current.revision }, 'PUT')).json()
+  assert.equal(Object.hasOwn(current.entry, 'data_query_workflows'), false)
+  current = await (await json(`/api/admin/knowledge/${id}`, { entry: withMethods(['revenue_report'], { revenue_report: 'wf-trend' }), revision: current.revision }, 'PUT')).json()
+  assert.deepEqual(current.entry.data_query_workflows, ['revenue_report'])
+  current = await (await json(`/api/admin/knowledge/${id}`, { entry: withMethods([], { revenue_report: 'wf-trend' }), revision: current.revision }, 'PUT')).json()
+  assert.equal(Object.hasOwn(current.entry, 'data_query_workflows'), false)
+})
+
+test('stored annotations that do not name a method are dropped on read; the catalog stays available and the file is not rewritten', async t => {
+  const { json, read, content, origin } = await fixture(t)
+  const base = await read()
+  await json('/api/admin/knowledge', { entry: withMethods(['query_card_data']), revision: base.revision })
+  const catalogPath = path.join(content, 'knowledge/catalog.json')
+  const valid = JSON.parse(await readFile(catalogPath, 'utf8'))
+  for (const [marks, expected] of [
+    [['gone'], undefined],
+    [['query_card_data', 'query_card_data'], ['query_card_data']],
+    [['gone', 'query_card_data'], ['query_card_data']],
+  ] as const) {
+    const raw = structuredClone(valid); raw.items[0].data_query_workflows = marks
+    const bytes = JSON.stringify(raw)
+    await writeFile(catalogPath, bytes)
+    // A stale hint must not take every library offline for every client.
+    const listed = await new KnowledgeStore(content).list()
+    assert.deepEqual(listed.items[0]!.data_query_workflows, expected as string[] | undefined)
+    assert.equal(await readFile(catalogPath, 'utf8'), bytes)
+    for (const route of ['/api/knowledge/metrics', '/api/knowledge/metrics/v2']) assert.equal((await fetch(origin + route)).status, 200)
+  }
+  // Something that is not a list is a damaged file, not a stale hint.
+  const damaged = structuredClone(valid); damaged.items[0].data_query_workflows = 'query_card_data'
+  await writeFile(catalogPath, JSON.stringify(damaged))
+  await assert.rejects(new KnowledgeStore(content).list(), { code: 'CONTENT_UNAVAILABLE', status: 503 })
+})

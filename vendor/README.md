@@ -1,6 +1,8 @@
 # 共享发布协议制品
 
-`dsh-ops-release-contract-0.1.1.tgz` 是产品仓库 `packages/shared/release-contract` 的原始 pnpm pack 产物，统一官网与 Desktop 的显式 HTTP/HTTPS 源地址规则。来源提交、输入哈希与制品 SHA-256 记录在 [release-contract.json](release-contract.json)。源包由产品仓库维护；官网不直接修改制品内的校验器。旧 0.1.0 制品保留用于审计，不再被当前依赖引用。
+`dsh-ops-release-contract-0.1.3.tgz` 是产品仓库 `packages/shared/release-contract` 的原始 pnpm pack 产物，统一官网与 Desktop 的显式 HTTP/HTTPS 源地址和正式版 / Beta / RC 更新规则。请求可带 `channel=stable|beta`，响应与 catalog 仍为 schemaVersion 1；缺参数统一按 stable 处理（仅接收更高正式版），新版测试版频道只接收正式版及首段精确为 beta / rc 的预发布。来源提交、输入哈希与制品 SHA-256 记录在 [release-contract.json](release-contract.json)。源包由产品仓库维护；官网不直接修改制品内的校验器。旧 0.1.0、0.1.1、0.1.2 制品保留用于审计，不再被当前依赖引用。
+
+当前 0.1.3 制品的输入已逐文件核对，与来源清单中 `sourceCommit` 对应的已提交源码一致（`sourceWorkingTree: false`）。
 
 未提交源码的本地联调制品以 `sourceWorkingTree: true` 明确标记，`sourceCommit` 记录基线，`sourceSha256` 固定实际输入；不将基线提交冒充已包含改动的发布提交。正式发布应从审核后的对应源码重新构建并核对输入哈希。
 
@@ -28,4 +30,8 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 
 ## 运营打点协议
 
-`dsh-ops-tracking-0.1.0-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/logger-tracking` 的 pnpm pack。来源、工作区输入及 SHA-256 见 [tracking.json](tracking.json)。官网仅导入 `@dsh-ops/tracking/contracts`，不加载 Host/Cordis。更新时在产品仓库完成 build/test 后 pack 到 vendor，以内容哈希命名新制品（避免同路径缓存旧包），更新 package.json、输入/制品哈希，执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。当前为明确标记的 sourceWorkingTree 联调制品，正式发布应从审核后的源码重新生成。
+`dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz` 来自产品仓库 `packages/shared/tracking-contract` 的 pnpm pack。它只依赖精确版本 zod，官网从 `@dsh-ops/tracking-contract` 根入口读取事件契约，不安装或加载 DSH、Cordis、Host 插件及其私有依赖。契约目录版本 4，事件/批次 schemaVersion 仍为 1，支持 WeLink 姓名、部门及资料查询时间。产品原 `@dsh-ops/tracking/contracts` 仅转导出此唯一契约源码以保持兼容。
+
+来源、工作区输入及 SHA-256 见 [tracking.json](tracking.json)。按产品升级计划 K16，契约变更时必须构建纯包，不得再打包包含私有 workspace 依赖的完整 tracking 插件。更新时在产品仓库完成纯包 build/test 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、来源清单与锁文件，执行官网 `pnpm install --no-frozen-lockfile` 和 check/build。先重启官网，再更新终端；旧服务端严格校验会拒收新增字段。
+
+当前为明确标记的 sourceWorkingTree 联调制品，正式发布应从审核后的源码重新生成。旧 `dsh-ops-tracking-*` 制品仅保留审计，不再被依赖引用；不得覆盖已有制品路径。

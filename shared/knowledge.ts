@@ -21,6 +21,12 @@ export type MetricKnowledgeEntry = {
   skill_name: string | null
   /** Preserves unpublished multi-reference rows until an administrator selects one skill. */
   pending_skill_names?: string[] | undefined
+  /**
+   * Method names (keys of `knowledge_retrieve_workflow_id`) whose result is data the client may draw as a chart.
+   * Always a subset of those keys, in their order, and absent when empty. Only the v2 catalog carries it: the v1
+   * projection served to already released clients never does.
+   */
+  data_query_workflows?: string[] | undefined
   created_at: string
   updated_at: string
 }
@@ -47,6 +53,12 @@ export const maxSkillFileName = 200
 export function validMetricKnowledgeId(value: unknown): value is string {
   return typeof value === 'string' && value.length <= maxKnowledgeId && metricKnowledgeIdPattern.test(value)
 }
+
+/**
+ * The historical data method. Clients treat it as a data query without any annotation, so it never has to be tagged;
+ * the editor shows it as such.
+ */
+export const legacyDataQueryWorkflow = 'query_card_data'
 
 /** Historical stored names remain readable; these rules apply to newly added or renamed methods. */
 export function validWorkflowName(name: string): boolean {

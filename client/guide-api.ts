@@ -33,6 +33,7 @@ const messages: Record<string, string> = {
   SKILL_SELECTION_REQUIRED: '请明确选择一个技能或不引用技能。',
   INVALID_WORKFLOW_NAME: '新增或改名的工作流名称只允许 1–64 位字母、数字、下划线或连字符，且不能使用保留名称。',
   INVALID_SKILL_REFERENCE: '所选技能已不存在，请刷新列表后重新选择引用技能。',
+  INVALID_DATA_QUERY_WORKFLOW: '“数据查询”标注必须落在本知识库已配置的工作流上，请刷新页面后重新勾选。',
   SKILL_IN_USE: '该技能仍被知识库引用，请先在相关知识库中取消勾选并保存；已下架的知识库也需要解除引用。',
   EXPERT_SKILL_NOT_FOUND: '草稿里已没有这个技能，请刷新后重试。',
   EXPERT_NOT_FOUND: '专家不存在或已被删除，请刷新列表。', EXPERT_ID_TAKEN: '该专家 ID 已被占用，请换一个。', EXPERT_LIMIT: '专家数量已达到 200 个上限，请先整理。',
@@ -61,7 +62,7 @@ export async function guideApi<T>(url: string, options: { method?: string; data?
 }
 export const requestMessage = (error: unknown) => error instanceof ApiError ? error.message : '连接未完成，请检查网络后重试。'
 
-export function uploadFile<T>(url: string, file: File, options: { csrf: string; revision?: string; signal: AbortSignal; progress: (percent: number) => void }): Promise<T> {
+export function uploadFile<T>(url: string, file: File, options: { csrf: string; revision?: string; headers?: Record<string, string>; signal: AbortSignal; progress: (percent: number) => void }): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     const abort = () => xhr.abort()
@@ -69,6 +70,7 @@ export function uploadFile<T>(url: string, file: File, options: { csrf: string; 
     xhr.open('POST', url); xhr.timeout = 30 * 60 * 1000; xhr.withCredentials = true
     xhr.setRequestHeader('Content-Type', 'application/octet-stream'); xhr.setRequestHeader('X-CSRF-Token', options.csrf)
     if (options.revision) xhr.setRequestHeader('X-Revision', options.revision)
+    for (const [name, value] of Object.entries(options.headers ?? {})) xhr.setRequestHeader(name, value)
     xhr.upload.onprogress = e => { if (e.lengthComputable) options.progress(Math.round(e.loaded / e.total * 100)) }
     xhr.onload = () => { try { const data = JSON.parse(xhr.responseText); xhr.status >= 200 && xhr.status < 300 ? finish(undefined, data) : finish(new ApiError(data.error, issuesOf(data.issues))) } catch { finish(new Error('Invalid response')) } }
     xhr.onerror = xhr.ontimeout = () => finish(new Error('Upload failed'))

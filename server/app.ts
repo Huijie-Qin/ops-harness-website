@@ -39,7 +39,8 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
       if (url.pathname === '/health') { json(req, res, 200, { status: 'ok' }); return }
       if (url.pathname === '/api/releases/check') {
         const query = CheckQuerySchema.safeParse(Object.fromEntries(url.searchParams))
-        if (!query.success || Array.from(url.searchParams.keys()).length !== 3) { json(req, res, 400, { error: 'INVALID_UPDATE_QUERY' }); return }
+        const keys = Array.from(url.searchParams.keys())
+        if (!query.success || new Set(keys).size !== keys.length) { json(req, res, 400, { error: 'INVALID_UPDATE_QUERY' }); return }
         const catalog = await readCatalog(config.releaseDirectory)
         json(req, res, 200, decideUpdate(catalog, query.data, config.websiteUrl, options.now?.()))
         return
@@ -110,7 +111,7 @@ export function createHandler(config: WebsiteConfig, options: { clientRoot: stri
       }
       const editorStyle = url.pathname === '/admin' ? " 'unsafe-inline'" : ''
       const editorScript = url.pathname === '/admin' && options.adminIconHash ? ` 'sha256-${options.adminIconHash}'` : ''
-      res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'${editorScript}; style-src 'self'${editorStyle}; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'`)
+      res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'${editorScript}; style-src 'self'${editorStyle}; img-src 'self' data:; media-src 'self'${url.pathname === '/admin' ? ' blob:' : ''}; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'`)
       const page = ['/', '/guide', '/admin', '/releases'].includes(url.pathname)
       const segments = page ? ['index.html'] : url.pathname.slice(1).split('/').map(decodeURIComponent)
       const ext = path.extname(segments.at(-1) ?? '')
