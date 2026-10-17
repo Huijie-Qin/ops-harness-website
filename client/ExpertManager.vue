@@ -12,7 +12,14 @@ import ExpertBuiltinScenarios from './ExpertBuiltinScenarios.vue'
 import ScenarioListEditor from './ScenarioListEditor.vue'
 
 type Owner = { name: string; employeeId: string; contact?: string }
-type SkillRow = { name: string; sha256: string; size: number; kind: 'zip' | 'md'; required: boolean; fileName?: string }
+/** A draft Skill; `displayName`, `original` and `fixes` say how the website repaired an upload (the server keeps them). */
+type SkillRow = {
+  name: string; sha256: string; size: number; kind: 'zip' | 'md'; required: boolean; fileName?: string
+  displayName?: string; original?: { sha256: string; size: number; kind: 'zip' | 'md'; fileName: string }; fixes?: string[]; checkedWith?: string
+}
+type SkillUploadResult = { revision: string; expert: Expert; warnings?: string[]; skill?: { name: string; displayName?: string; fixes: string[]; replaced: boolean } }
+/** The runtime's Skill name grammar, for the English name an admin types. */
+const SKILL_NAME_INPUT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 type ToolRef = { toolId: string; required: boolean } | { customTool: string; required: boolean }
 type KnowledgeRef = { kind: 'metric'; knowledgeId: string; name?: string; required: boolean }
   | { kind: 'onebox'; ref: string; name: string; description?: string; spaceId?: string; sharedLibraryId?: string; required: boolean }
@@ -72,6 +79,8 @@ const scenarioEditing = ref(false)
 const form = ref<Form>(), baseline = ref(''), distribution = ref<DistributionForm>(), distributionBaseline = ref('')
 const busy = ref(false), loading = ref(true), notice = ref(''), error = ref(''), issues = ref<string[]>([])
 const progress = ref(0), uploadName = ref(''), skillRequired = ref(true)
+/** An upload waiting for the English name its own name could not become; the file is sent again with it. */
+const namePrompt = ref<{ file: File; message: string; value: string }>(), namePromptError = ref(''), skillNameInput = ref<HTMLInputElement>()
 const errorElement = ref<HTMLElement>(), skillInput = ref<HTMLInputElement>(), packageInput = ref<HTMLInputElement>(), nameInput = ref<HTMLInputElement>()
 const confirmation = ref<{ title: string; message: string; label?: string; action: () => void }>()
 const creating = ref<{ id: string; name: string }>()
@@ -267,22 +276,59 @@ function removeExpert() {
   }) }
 }
 async function sendSkill(event: Event) {
-  const input = event.target as HTMLInputElement, file = input.files?.[0], expert = current.value
-  if (!file || !expert) return
+  const input = event.target as HTMLInputElement, file = input.files?.[0]
+  input.value = ''
+  if (file) await uploadSkill(file)
+}
+/**
+ * Upload one Skill. The website repairs what it can for sure first (as 我的技能 does) and says what it changed; a name it
+ * cannot turn into an English one comes back as SKILL_NAME_REQUIRED, and the same file goes again with the name typed here.
+ */
+async function uploadSkill(file: File, givenName?: string) {
+  const expert = current.value
+  if (!expert) return
+  let askName = false
   await run(async () => {
     upload = new AbortController()
     try {
       if (file.size > EXPERT_LIMITS.skillBytes) throw new ApiError('UPLOAD_TOO_LARGE')
       if (!/\.(zip|md)$/i.test(file.name)) throw new ApiError('INVALID_SKILL_FILE')
       uploadName.value = file.name; progress.value = 0
-      const result = await uploadFile<{ revision: string; expert: Expert; warnings?: string[] }>(`/api/admin/experts/${encodeURIComponent(expert.id)}/skills?name=${encodeURIComponent(file.name)}&required=${skillRequired.value}`, file,
+      const query = `name=${encodeURIComponent(file.name)}&required=${skillRequired.value}${givenName ? `&skillName=${encodeURIComponent(givenName)}` : ''}`
+      const result = await uploadFile<SkillUploadResult>(`/api/admin/experts/${encodeURIComponent(expert.id)}/skills?${query}`, file,
         { csrf: props.csrf, revision: revision.value, signal: upload.signal, progress: v => progress.value = v })
+      namePrompt.value = undefined
       adopt(result.expert, result.revision); await list()
-      notice.value = result.warnings?.length ? `技能已校验并加入草稿。注意：${result.warnings.join('；')}` : '技能已校验并加入草稿，发布后使用者会收到。'
-    } catch (e) { if (upload.signal.aborted) notice.value = '上传已取消。'; else throw e }
-    finally { uploadName.value = ''; input.value = '' }
+      notice.value = skillNotice(result)
+    } catch (e) {
+      if (upload.signal.aborted) { notice.value = '上传已取消。'; return }
+      if (e instanceof ApiError && e.code === 'SKILL_NAME_REQUIRED') {
+        namePrompt.value = { file, message: e.issues[0] ?? e.message, value: givenName ?? e.details.suggestion ?? '' }
+        namePromptError.value = ''
+        askName = true
+        return
+      }
+      throw e
+    } finally { uploadName.value = '' }
   })
+  // The prompt sits in the editor's fieldset, which is enabled again only once the upload has finished.
+  if (askName) { await nextTick(); skillNameInput.value?.focus() }
 }
+function skillNotice(result: SkillUploadResult): string {
+  const skill = result.skill
+  const label = skill ? (skill.displayName ? `${skill.displayName}（${skill.name}）` : skill.name) : ''
+  const head = skill ? `技能「${label}」已${skill.replaced ? '替换同名技能、' : ''}校验并加入草稿` : '技能已校验并加入草稿'
+  const fixed = skill?.fixes.length ? `，上传时自动修好 ${skill.fixes.length} 处（可在技能列表里展开查看）` : ''
+  return result.warnings?.length ? `${head}${fixed}。注意：${result.warnings.join('；')}` : `${head}${fixed}，发布后使用者会收到。`
+}
+function submitSkillName() {
+  const prompt = namePrompt.value
+  if (!prompt) return
+  const value = prompt.value.trim()
+  if (!SKILL_NAME_INPUT.test(value) || value.length > 64) { namePromptError.value = '英文名只能用小写英文、数字和短横线（不能以短横线开头或结尾），最多 64 个字符。'; return }
+  void uploadSkill(prompt.file, value)
+}
+function cancelSkillName() { namePrompt.value = undefined; namePromptError.value = '' }
 function detachSkill(name: string) {
   const expert = current.value
   if (!expert) return
@@ -477,8 +523,21 @@ function scenarioChangeText(changes: NonNullable<Preview['changes']>['scenarios'
             </div>
             <p v-if="unsaved" class="editor-help">{{ scenarioEditing ? '请先保存或取消正在编辑的场景，再上传或移除技能。' : '请先保存草稿，再上传或移除技能。' }}</p>
             <div v-if="uploadName" class="upload-progress" role="status"><span>{{ uploadName }}</span><progress :value="progress" max="100"></progress>{{ progress }}%</div>
+            <div v-if="namePrompt" class="skill-name-prompt" role="group" aria-labelledby="skill-name-prompt-title">
+              <p id="skill-name-prompt-title">{{ namePrompt.message }}</p>
+              <form @submit.prevent="submitSkillName">
+                <label>技能英文名<input ref="skillNameInput" v-model="namePrompt.value" maxlength="64" autocomplete="off" spellcheck="false" placeholder="例如 weekly-report" :aria-invalid="namePromptError ? 'true' : undefined" aria-describedby="skill-name-prompt-help" @keydown.esc.prevent="cancelSkillName" /></label>
+                <button type="submit" class="button primary" :disabled="busy || !namePrompt.value.trim()">继续上传</button>
+                <button type="button" class="button secondary" :disabled="busy" @click="cancelSkillName">取消</button>
+              </form>
+              <small id="skill-name-prompt-help">{{ namePrompt.file.name }} · 只能用小写英文、数字和短横线；技能原来的名字会保留为显示名。</small>
+              <small v-if="namePromptError" class="skill-name-error" role="alert">{{ namePromptError }}</small>
+            </div>
             <article v-for="skill in form.skills" :key="skill.name" class="package-file">
-              <div><strong>{{ skill.name }}</strong><small>{{ skill.fileName ?? `${skill.name}.${skill.kind}` }} · {{ size(skill.size) }}</small></div>
+              <div><strong>{{ skill.displayName ? `${skill.displayName}（${skill.name}）` : skill.name }}</strong><small>{{ skill.fileName ?? `${skill.name}.${skill.kind}` }} · {{ size(skill.size) }}</small>
+                <details v-if="skill.fixes?.length"><summary>上传时自动修好 {{ skill.fixes.length }} 处</summary><ul class="skill-fixes"><li v-for="fix in skill.fixes" :key="fix">{{ fix }}</li></ul></details>
+              </div>
+              <a v-if="skill.original && current" :href="`/api/admin/experts/${encodeURIComponent(current.id)}/skills/${encodeURIComponent(skill.name)}/original`" :download="skill.original.fileName">下载原文</a>
               <label class="check-label"><input v-model="skill.required" type="checkbox" />必需</label>
               <button type="button" :disabled="busy || unsaved" @click="detachSkill(skill.name)">移除</button>
             </article>

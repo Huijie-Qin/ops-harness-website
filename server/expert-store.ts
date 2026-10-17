@@ -16,13 +16,13 @@ import {
 import { GuideError, revisionOf } from './guide-store.js'
 import { atomicJson, missing, readJson, receiveFile, safeDirectory, withLock } from './admin-files.js'
 import { extractArchiveEntry, readArchive, type ArchiveEntry, type KnowledgeStore } from './knowledge-store.js'
-import { checkExpertSkill, ExpertSkillProblem, type ExpertSkillCheck } from './expert-skill.js'
+import { checkExpertSkill, ExpertSkillNameRequired, ExpertSkillProblem, prepareUploadedSkill, SKILL_RULES_VERSION, type ExpertSkillCheck } from './expert-skill.js'
 import { BuiltinScenarioStore, scenarioIssueText } from './builtin-scenario-store.js'
 import { maxSkillFileName } from '../shared/knowledge.js'
 
 /** Validation failure with the individual problems the admin page lists next to the form. */
 export class ExpertValidationError extends GuideError {
-  constructor(code: string, readonly issues: string[], status = 400) { super(code, status) }
+  constructor(code: string, readonly issues: string[], status = 400, readonly details?: Readonly<Record<string, string>>) { super(code, status) }
 }
 const fail = (code: string, status = 400): never => { throw new GuideError(code, status) }
 const invalid = (issues: string[], code = 'INVALID_EXPERT'): never => { throw new ExpertValidationError(code, issues) }
@@ -41,6 +41,19 @@ const DraftSkillSchema = z.object({
   kind: z.enum(['zip', 'md']),
   required: z.boolean(),
   fileName: z.string().max(maxSkillFileName).optional(),
+  /** What people read when it differs from `name`: the manifest's own name an upload's repair kept. Admin only. */
+  displayName: z.string().max(80).optional(),
+  /** The file as the admin uploaded it, when the stored one was repaired from it: kept for the admin, never distributed. */
+  original: z.object({
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    size: z.number().int().positive().max(EXPERT_LIMITS.skillBytes),
+    kind: z.enum(['zip', 'md']),
+    fileName: z.string().max(maxSkillFileName),
+  }).strict().optional(),
+  /** What that repair changed, one sentence each. */
+  fixes: z.array(z.string().max(1000)).max(40).optional(),
+  /** The shared Skill rules the stored file was checked with (`SKILL_RULES_VERSION`); publishing re-checks a file checked with older ones. */
+  checkedWith: z.string().max(64).optional(),
 }).strict()
 /** A draft may be unfinished (empty responsibility, no owner yet); publishing applies the full rules. */
 const DraftSchema = z.object({
@@ -61,6 +74,18 @@ const DraftSchema = z.object({
   owner: OwnerSchema.optional(),
 }).strict()
 export type ExpertDraft = z.infer<typeof DraftSchema>
+/** One Skill the current rules refuse, as `auditSkills` reports it. */
+export interface SkillAuditRow {
+  expertId: string
+  /** `draft`, or the published version (`v3`). */
+  where: 'draft' | `v${string}`
+  name: string
+  problems: string[]
+  /** Uploading the same file again repairs it under the same name. */
+  repairable: boolean
+  /** Its own name cannot become a Skill name: the admin gives an English one on upload. */
+  needsName: boolean
+}
 const DistributionSchema = z.object({
   status: z.enum(['active', 'disabled']),
   visibility: VisibilitySchema,
@@ -170,6 +195,21 @@ interface ParsedPackage {
 const BOM_PREFIX = new RegExp('^' + String.fromCharCode(0xfeff))
 function digestOf(value: unknown): string { return revisionOf(JSON.stringify(value)) }
 function sha256(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex') }
+/**
+ * A saved draft Skill with what its upload recorded (display name, original, fixes, rules) taken from the server's
+ * own record, never from the save: the page cannot point a Skill at another stored original.
+ */
+function withUploadFacts(skill: ExpertDraft['skills'][number], stored: ExpertDraft['skills']): ExpertDraft['skills'][number] {
+  const { displayName: _displayName, original: _original, fixes: _fixes, checkedWith: _checkedWith, ...saved } = skill
+  const own = stored.find(item => item.name === skill.name && item.sha256 === skill.sha256 && item.kind === skill.kind)
+  return {
+    ...saved,
+    ...(own?.displayName === undefined ? {} : { displayName: own.displayName }),
+    ...(own?.original === undefined ? {} : { original: own.original }),
+    ...(own?.fixes === undefined ? {} : { fixes: own.fixes }),
+    ...(own?.checkedWith === undefined ? {} : { checkedWith: own.checkedWith }),
+  }
+}
 function unique<T>(values: readonly T[]) { return new Set(values).size === values.length }
 function utf8Size(value: string) { return Buffer.byteLength(value, 'utf8') }
 function knowledgeKey(ref: KnowledgeRef) { return ref.kind === 'metric' ? `metric:${ref.knowledgeId}` : `onebox:${ref.ref}` }
@@ -211,6 +251,8 @@ function parse<T>(schema: z.ZodType<T>, input: unknown, code = 'INVALID_EXPERT')
 export class ExpertStore {
   readonly root: string
   readonly skills: string
+  /** Uploads as the admin sent them, when what is stored was repaired from them (by content hash, never distributed). */
+  readonly originals: string
   readonly versions: string
   readonly imports: string
   private readonly snapshots = new Map<string, Snapshot>()
@@ -220,6 +262,7 @@ export class ExpertStore {
   constructor(directory: string, private readonly knowledge?: KnowledgeStore, private readonly now: () => number = Date.now) {
     this.root = path.join(directory, 'experts')
     this.skills = path.join(this.root, 'skills')
+    this.originals = path.join(this.root, 'skill-originals')
     this.versions = path.join(this.root, 'versions')
     this.imports = path.join(this.root, 'imports')
     this.toolLibrary = 'tools.json'
@@ -501,7 +544,8 @@ export class ExpertStore {
       // Skills enter a draft only by upload or import; a save may reorder, re-flag or drop them.
       await this.assertDraftSkills(draft, record.draft.skills)
       await this.assertToolRefs(draft)
-      return this.replaceRecord(current, { ...record, draft, updatedAt: new Date(this.now()).toISOString() })
+      const skills = draft.skills.map(skill => withUploadFacts(skill, record.draft.skills))
+      return this.replaceRecord(current, { ...record, draft: { ...draft, skills }, updatedAt: new Date(this.now()).toISOString() })
     })
   }
   async remove(id: string, expected: unknown) {
@@ -583,7 +627,26 @@ export class ExpertStore {
     // Saves already apply these rules; a draft stored under older rules is caught here before it reaches anyone.
     for (const issue of scenarioIssues(draft.scenarios ?? [])) issues.push(scenarioIssueText(issue))
     await this.assertDraftSkills(draft, draft.skills)
+    issues.push(...await this.skillRuleIssues(draft))
     if (issues.length) invalid(issues, 'EXPERT_NOT_PUBLISHABLE')
+  }
+  /**
+   * Skills stored before the shared rules judged them the way DSH loads a Skill (2026-10-16) are checked again before
+   * they reach anyone: one DSH would skip (a name with a line break after it, a camelCase switch) must be uploaded again,
+   * which repairs it. Skills checked with the current rules are not read again.
+   */
+  private async skillRuleIssues(draft: ExpertDraft): Promise<string[]> {
+    const issues: string[] = []
+    for (const skill of draft.skills) {
+      if (skill.checkedWith === SKILL_RULES_VERSION) continue
+      const bytes = await readFile(path.join(this.skills, `${skill.sha256}.${skill.kind}`))
+      try { checkExpertSkill(bytes, skill.kind, skill.name) }
+      catch (error) {
+        if (!(error instanceof ExpertSkillProblem)) throw error
+        issues.push(`技能「${skill.name}」：${error.problems.join('；')}。请重新上传这个技能，上传时会自动修好能修的问题`)
+      }
+    }
+    return issues
   }
   private async metricCatalog() {
     if (!this.knowledge) return new Map<string, { enabled: boolean }>()
@@ -602,49 +665,95 @@ export class ExpertStore {
     }
   }
 
-  /**
-   * Check one Skill file by the rules every side of expert distribution applies (`checkExpertSkill`) and store it by
-   * content hash (identical files are reused). `expectedName`: the name it travels under in a package.
-   */
-  private async storeSkill(bytes: Buffer, kind: 'zip' | 'md', expectedName?: string) {
-    let skill: ExpertSkillCheck
-    try { skill = checkExpertSkill(bytes, kind, expectedName) }
-    catch (error) { if (error instanceof ExpertSkillProblem) return invalid(error.problems, 'INVALID_EXPERT_SKILL'); throw error }
+  /** Store one file by content hash under `directory` (identical files are reused). */
+  private async storeContent(directory: string, bytes: Buffer, kind: 'zip' | 'md') {
     const hash = sha256(bytes)
-    await safeDirectory(this.root); await safeDirectory(this.skills)
-    const stored = path.join(this.skills, `${hash}.${kind}`)
+    await safeDirectory(this.root); await safeDirectory(directory)
+    const stored = path.join(directory, `${hash}.${kind}`)
     try {
       const info = await lstat(stored)
       if (!info.isFile() || info.isSymbolicLink() || info.size !== bytes.length) return fail('CONTENT_UNAVAILABLE', 503)
     } catch (error) {
       if (error instanceof GuideError) throw error
       if (!missing(error)) throw error
-      const temp = path.join(this.skills, `.${randomUUID()}.tmp`)
+      const temp = path.join(directory, `.${randomUUID()}.tmp`)
       const handle = await open(temp, 'wx', 0o600)
       try { await handle.writeFile(bytes); await handle.sync() } finally { await handle.close() }
       await rename(temp, stored)
     }
-    return { name: skill.name, sha256: hash, size: bytes.length, kind, legacy: skill.legacy }
+    return { sha256: hash, size: bytes.length }
   }
-  async attachSkill(id: string, fileName: string, required: boolean, req: IncomingMessage, expected: unknown) {
+  /**
+   * Check one Skill file of a package by the rules every side of expert distribution applies (`checkExpertSkill`) and
+   * store it by content hash. `expectedName`: the name it travels under in the package.
+   */
+  private async storeSkill(bytes: Buffer, kind: 'zip' | 'md', expectedName?: string) {
+    let skill: ExpertSkillCheck
+    try { skill = checkExpertSkill(bytes, kind, expectedName) }
+    catch (error) { if (error instanceof ExpertSkillProblem) return invalid(error.problems, 'INVALID_EXPERT_SKILL'); throw error }
+    return { name: skill.name, ...await this.storeContent(this.skills, bytes, kind), kind, legacy: skill.legacy }
+  }
+  /**
+   * Add one Skill an admin uploads to a draft: repaired with the module the product's 我的技能 repairs with, then checked
+   * by the rules every receiver applies, stored, and the upload kept beside it when the repair changed it. A name that
+   * cannot become a Skill name is answered with `SKILL_NAME_REQUIRED` (and a suggestion); the page asks the admin and
+   * sends the same file again with `givenName`. A Skill of the same name in the draft is replaced.
+   */
+  async attachSkill(id: string, fileName: string, required: boolean, req: IncomingMessage, expected: unknown, givenName?: string) {
     if (!fileName || fileName.length > maxSkillFileName || [...fileName].some(char => char === '/' || char === '\\' || char.charCodeAt(0) < 32)) return fail('INVALID_SKILL_FILE')
     const kind = /\.zip$/i.test(fileName) ? 'zip' as const : /\.md$/i.test(fileName) ? 'md' as const : fail('INVALID_SKILL_FILE')
+    if (givenName !== undefined && (givenName.length > 64 || !SKILL_NAME_PATTERN.test(givenName))) return fail('INVALID_SKILL_NAME')
     await safeDirectory(this.root); await safeDirectory(this.skills)
     const file = await receiveFile(req, this.skills, EXPERT_LIMITS.skillBytes)
     try {
-      const { legacy, ...stored } = await this.storeSkill(await readFile(file.temp), kind)
-      if (RESERVED_SKILL_NAMES.has(stored.name) || stored.name.startsWith(RESERVED_SKILL_PREFIX)) return invalid([`技能名称 ${stored.name} 为系统保留`])
+      const upload = await readFile(file.temp)
+      let prepared: ReturnType<typeof prepareUploadedSkill>
+      try { prepared = prepareUploadedSkill(upload, kind, fileName, givenName) }
+      catch (error) {
+        if (error instanceof ExpertSkillNameRequired) throw new ExpertValidationError('SKILL_NAME_REQUIRED', [error.message], 422, { suggestion: error.suggestion })
+        if (error instanceof ExpertSkillProblem) return invalid(error.problems, 'INVALID_EXPERT_SKILL')
+        throw error
+      }
+      if (RESERVED_SKILL_NAMES.has(prepared.name) || prepared.name.startsWith(RESERVED_SKILL_PREFIX)) return invalid([`技能名称 ${prepared.name} 为系统保留`])
+      const stored = await this.storeContent(this.skills, prepared.bytes, prepared.kind)
+      // The upload as it came, only when the stored file differs from it.
+      const original = upload.equals(prepared.bytes) ? undefined : { ...await this.storeContent(this.originals, upload, kind), kind, fileName }
+      const fixes = prepared.fixes.slice(0, 40).map(fix => fix.slice(0, 1000))
       let count = 0
+      let replaced = false
       const result = await this.change(expected, async current => {
         const record = this.found(current, id)
-        const skills = record.draft.skills.filter(skill => skill.name !== stored.name)
+        replaced = record.draft.skills.some(skill => skill.name === prepared.name)
+        const skills = record.draft.skills.filter(skill => skill.name !== prepared.name)
         if (skills.length >= EXPERT_LIMITS.skills) return fail('SKILL_LIMIT', 409)
         count = skills.length + 1
-        const draft = { ...record.draft, skills: [...skills, { ...stored, required, fileName }] }
+        const entry: ExpertDraft['skills'][number] = {
+          name: prepared.name, ...stored, kind: prepared.kind, required, fileName,
+          ...(prepared.displayName ? { displayName: prepared.displayName.slice(0, 80) } : {}),
+          ...(original ? { original } : {}),
+          ...(fixes.length ? { fixes } : {}),
+          checkedWith: SKILL_RULES_VERSION,
+        }
+        const draft = { ...record.draft, skills: [...skills, entry] }
         return this.replaceRecord(current, { ...record, draft, updatedAt: new Date(this.now()).toISOString() })
       })
-      return { ...result, warnings: legacyWarnings([{ name: stored.name, legacy }], count) }
+      return {
+        ...result,
+        warnings: legacyWarnings([{ name: prepared.name, legacy: prepared.check.legacy }], count),
+        skill: { name: prepared.name, ...(prepared.displayName ? { displayName: prepared.displayName } : {}), fixes, replaced },
+      }
     } finally { await unlink(file.temp).catch(error => { if (!missing(error)) throw error }) }
+  }
+  /** Where the upload of one draft Skill is kept as the admin sent it, for the admin to download. */
+  async originalSkill(id: string, name: string) {
+    const current = await this.load()
+    const skill = this.found(current, id).draft.skills.find(item => item.name === name)
+    const original = skill?.original
+    if (!original) return fail('NOT_FOUND', 404)
+    return {
+      root: this.root, segments: ['skill-originals', `${original.sha256}.${original.kind}`], size: original.size, sha256: original.sha256,
+      fileName: original.fileName, type: original.kind === 'zip' ? 'application/zip' : 'text/markdown; charset=utf-8',
+    }
   }
   async detachSkill(id: string, name: string, expected: unknown) {
     return this.change(expected, async current => {
@@ -815,7 +924,8 @@ export class ExpertStore {
       sortOrder: definition.sortOrder ?? previous?.sortOrder ?? 1000,
       builtinTools: definition.builtinTools,
       responsibility: parsed.responsibility,
-      skills: definition.skills.map(skill => ({ name: skill.name, sha256: skill.sha256, size: skill.size, kind: 'zip' as const, required: skill.required, fileName: `${skill.name}.zip` })),
+      // Every Skill of a package was checked with the current rules when it was parsed (`parsePackage`).
+      skills: definition.skills.map(skill => ({ name: skill.name, sha256: skill.sha256, size: skill.size, kind: 'zip' as const, required: skill.required, fileName: `${skill.name}.zip`, checkedWith: SKILL_RULES_VERSION })),
       tools: definition.tools.map(ref => 'customTool' in ref ? { customTool: mapping.get(ref.customTool) ?? ref.customTool, required: ref.required } : ref),
       knowledge: definition.knowledge,
       owner: definition.owner,
@@ -906,6 +1016,52 @@ export class ExpertStore {
     })
     await rm(directory, { recursive: true, force: true })
     return result
+  }
+
+  // ---- Skill audit (read only) ------------------------------------------------------------------
+
+  /**
+   * Every Skill a draft or the published version of an expert carries, checked by the current rules (2026-10-16:
+   * judged the way DSH loads a Skill). Writes nothing. A Skill that fails says whether uploading the same file again
+   * repairs it (`repairable`), or needs an English name the admin gives (`needsName`), or something only its author
+   * can change. `scripts/audit-expert-skills.ts` prints this before a client update reaches people.
+   */
+  async auditSkills(): Promise<SkillAuditRow[]> {
+    const document = await this.load()
+    const rows: SkillAuditRow[] = []
+    const seen = new Map<string, Omit<SkillAuditRow, 'expertId' | 'where' | 'name'>>()
+    const check = async (expertId: string, where: SkillAuditRow['where'], skill: ExpertDraft['skills'][number]) => {
+      const key = `${skill.sha256}.${skill.kind}\u0000${skill.name}`
+      let result = seen.get(key)
+      if (!result) {
+        let bytes: Buffer | undefined
+        try { bytes = await readFile(path.join(this.skills, `${skill.sha256}.${skill.kind}`)) } catch (error) { if (!missing(error)) throw error }
+        if (bytes === undefined) result = { problems: ['技能文件已不存在'], repairable: false, needsName: false }
+        else {
+          let problems: string[] = []
+          try { checkExpertSkill(bytes, skill.kind, skill.name) } catch (error) { if (!(error instanceof ExpertSkillProblem)) throw error; problems = error.problems }
+          let repairable = false, needsName = false
+          if (problems.length) {
+            try { repairable = prepareUploadedSkill(bytes, skill.kind, skill.fileName ?? `${skill.name}.${skill.kind}`).name === skill.name }
+            catch (error) {
+              if (error instanceof ExpertSkillNameRequired) needsName = true
+              else if (!(error instanceof ExpertSkillProblem)) throw error
+            }
+          }
+          result = { problems, repairable, needsName }
+        }
+        seen.set(key, result)
+      }
+      if (result.problems.length) rows.push({ expertId, where, name: skill.name, ...result })
+    }
+    for (const record of document.experts) {
+      for (const skill of record.draft.skills) await check(record.id, 'draft', skill)
+      if (record.published) {
+        const snapshot = await this.snapshot(record.id, record.published.version)
+        for (const skill of snapshot.content.skills) await check(record.id, `v${String(record.published.version)}`, skill)
+      }
+    }
+    return rows
   }
 
   // ---- Public, per-employee reads ---------------------------------------------------------------

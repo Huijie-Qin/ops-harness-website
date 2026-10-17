@@ -153,3 +153,24 @@ test('bundled expert distribution contract matches its provenance and installed 
   const scenarios = await import('@dsh-ops/expert-distribution-contract/scenarios')
   assert.equal(scenarios.scenarioIssues([{ id: 'a', title: '场景', prompt: '提问' }]).length, 0)
 })
+
+test('bundled skill contract matches its provenance and judges a Skill the way DSH loads it', async () => {
+  const record = JSON.parse(await readFile(new URL('../vendor/skill-contract.json', import.meta.url), 'utf8'))
+  const bytes = await readFile(new URL(`../vendor/${record.artifact}`, import.meta.url))
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), record.sha256)
+  assert.ok(record.artifact.endsWith(`-${record.sha256.slice(0, 12)}.tgz`))
+  const installed = JSON.parse(await readFile(new URL('../node_modules/@dsh-ops/skill-contract/package.json', import.meta.url), 'utf8'))
+  assert.equal(installed.name, record.name)
+  assert.equal(installed.version, record.version)
+  assert.deepEqual(installed.dependencies, { yaml: '2.9.0' })
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.dependencies[record.name], `file:vendor/${record.artifact}`)
+  const tree = await import('@dsh-ops/skill-contract/tree')
+  assert.deepEqual(tree.skillManifestIssues({ name: 'weekly-report\n', description: '周报' }).map(issue => issue.code), ['name-whitespace'])
+  assert.deepEqual(tree.skillManifestIssues({ name: 'weekly-report', description: '周报', userInvocable: false }).map(issue => issue.code), ['invocation-legacy'])
+  const normalize = await import('@dsh-ops/skill-contract/normalize')
+  const repaired = normalize.normalizeSkillTree(new Map([['SKILL.md', new TextEncoder().encode('---\nname: 周报\ndescription: 周报\n---\n')]]), {
+    limits: { maxFiles: 10, maxBytes: 1024 ** 2, maxFileBytes: 1024 ** 2 }, requireName: true,
+  })
+  assert.deepEqual(repaired.skills[0]!.problems.map(note => note.code), ['name-required'])
+})

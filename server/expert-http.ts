@@ -57,6 +57,15 @@ export async function handleExpertAdmin(store: ExpertStore, req: IncomingMessage
       }
       return true
     }
+    // The upload of one draft Skill as the admin sent it, kept when the stored file was repaired from it.
+    const original = /^\/api\/admin\/experts\/([^/]+)\/skills\/([^/]+)\/original$/.exec(url.pathname)
+    if (original) {
+      method(req, ['GET', 'HEAD'])
+      const file = await store.originalSkill(decodeURIComponent(original[1]!), decodeURIComponent(original[2]!))
+      res.setHeader('Cache-Control', 'no-store')
+      await serveFile(req, res, file.root, file.segments, { type: file.type, expectedSize: file.size, etag: `"${file.sha256}"`, attachment: file.fileName })
+      return true
+    }
     const match = /^\/api\/admin\/experts\/([^/]+)(?:\/(skills|distribution|publish)(?:\/([^/]+))?)?$/.exec(url.pathname)
     if (!match) throw new GuideError('NOT_FOUND', 404)
     const id = decodeURIComponent(match[1]!), action = match[2], child = match[3] === undefined ? undefined : decodeURIComponent(match[3])
@@ -67,7 +76,9 @@ export async function handleExpertAdmin(store: ExpertStore, req: IncomingMessage
     } else if (action === 'skills') {
       if (child === undefined) {
         method(req, ['POST'])
-        json(res, await store.attachSkill(id, url.searchParams.get('name') ?? '', url.searchParams.get('required') !== 'false', req, req.headers['x-revision']))
+        // `skillName`: the English name the admin gave after a `SKILL_NAME_REQUIRED` answer.
+        const givenName = url.searchParams.get('skillName') ?? undefined
+        json(res, await store.attachSkill(id, url.searchParams.get('name') ?? '', url.searchParams.get('required') !== 'false', req, req.headers['x-revision'], givenName))
       } else { method(req, ['DELETE']); json(res, await store.detachSkill(id, child, (await body(req)).revision)) }
     } else if (action === 'distribution' && child === undefined) {
       method(req, ['PUT']); const data = await body(req)
@@ -78,7 +89,8 @@ export async function handleExpertAdmin(store: ExpertStore, req: IncomingMessage
     return true
   } catch (error) {
     if (!(error instanceof ExpertValidationError) && !(error instanceof BuiltinScenarioError)) throw error
-    json(res, { error: error.code, issues: error.issues }, error.status)
+    const details = error instanceof ExpertValidationError ? error.details : undefined
+    json(res, { error: error.code, issues: error.issues, ...(details === undefined ? {} : { details }) }, error.status)
     return true
   }
 }
