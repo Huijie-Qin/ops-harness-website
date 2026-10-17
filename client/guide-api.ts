@@ -39,12 +39,17 @@ const messages: Record<string, string> = {
   EXPERT_NOT_FOUND: '专家不存在或已被删除，请刷新列表。', EXPERT_ID_TAKEN: '该专家 ID 已被占用，请换一个。', EXPERT_LIMIT: '专家数量已达到 200 个上限，请先整理。',
   INVALID_EXPERT: '专家内容不完整或格式不正确：', EXPERT_NOT_PUBLISHABLE: '还不能发布，请先完善：', NOTHING_TO_PUBLISH: '当前草稿与已发布版本一致，无需重复发布。',
   EXPERT_NOT_PUBLISHED: '请先发布，再上架。', SKILL_LIMIT: '一位专家最多 30 个技能。', INVALID_EXPERT_SKILL: '技能文件不符合要求：',
+  SKILL_NAME_REQUIRED: '这个技能需要一个英文名。', INVALID_SKILL_NAME: '英文名只能用小写英文、数字和短横线，最多 64 个字符。',
   INVALID_EXPERT_PACKAGE: '专家包无法导入：', EXPERT_PACKAGE_REJECTED: '专家包还有需要处理的问题：', IMPORT_NOT_FOUND: '导入已过期或已完成，请重新选择专家包。',
   INVALID_EXPERT_TOOL: '工具配置不符合要求：', EXPERT_TOOL_NOT_FOUND: '工具库中已没有这个工具，请刷新列表。', EXPERT_TOOL_IN_USE: '仍有专家在使用这个工具，请先在这些专家中移除：',
   INVALID_SCENARIOS: '常用场景不符合要求：', BUILTIN_EXPERT_NOT_FOUND: '这位内置专家不存在，请刷新列表。',
 }
-export class ApiError extends Error { constructor(public code: string, public issues: string[] = []) { super(messages[code] ?? '操作未完成，请稍后重试。') } }
+export class ApiError extends Error { constructor(public code: string, public issues: string[] = [], public details: Record<string, string> = {}) { super(messages[code] ?? '操作未完成，请稍后重试。') } }
 const issuesOf = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 12) : []
+/** Short string facts an answer carries beside its issues (a suggested Skill name). */
+const detailsOf = (value: unknown): Record<string, string> => value && typeof value === 'object' && !Array.isArray(value)
+  ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length <= 200).slice(0, 8))
+  : {}
 export async function guideApi<T>(url: string, options: { method?: string; data?: unknown; csrf?: string; signal?: AbortSignal; timeout?: number } = {}): Promise<T> {
   const controller = new AbortController()
   const abort = () => controller.abort()
@@ -56,7 +61,7 @@ export async function guideApi<T>(url: string, options: { method?: string; data?
       headers: { ...(options.data !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(options.csrf ? { 'X-CSRF-Token': options.csrf } : {}) },
       body: options.data === undefined ? undefined : JSON.stringify(options.data) })
     const value = await response.json()
-    if (!response.ok) throw new ApiError(value.error ?? 'CONTENT_UNAVAILABLE', issuesOf(value.issues))
+    if (!response.ok) throw new ApiError(value.error ?? 'CONTENT_UNAVAILABLE', issuesOf(value.issues), detailsOf(value.details))
     return value
   } finally { clearTimeout(timeout); options.signal?.removeEventListener('abort', abort) }
 }
@@ -72,7 +77,7 @@ export function uploadFile<T>(url: string, file: File, options: { csrf: string; 
     if (options.revision) xhr.setRequestHeader('X-Revision', options.revision)
     for (const [name, value] of Object.entries(options.headers ?? {})) xhr.setRequestHeader(name, value)
     xhr.upload.onprogress = e => { if (e.lengthComputable) options.progress(Math.round(e.loaded / e.total * 100)) }
-    xhr.onload = () => { try { const data = JSON.parse(xhr.responseText); xhr.status >= 200 && xhr.status < 300 ? finish(undefined, data) : finish(new ApiError(data.error, issuesOf(data.issues))) } catch { finish(new Error('Invalid response')) } }
+    xhr.onload = () => { try { const data = JSON.parse(xhr.responseText); xhr.status >= 200 && xhr.status < 300 ? finish(undefined, data) : finish(new ApiError(data.error, issuesOf(data.issues), detailsOf(data.details))) } catch { finish(new Error('Invalid response')) } }
     xhr.onerror = xhr.ontimeout = () => finish(new Error('Upload failed'))
     xhr.onabort = () => finish(new DOMException('Upload cancelled', 'AbortError'))
     options.signal.addEventListener('abort', abort, { once: true })
