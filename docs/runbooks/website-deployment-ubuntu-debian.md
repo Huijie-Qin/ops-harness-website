@@ -54,7 +54,7 @@ pnpm build
 - `host`、`port`：监听 IP 和端口，默认仅本机可访问。
 - `websiteUrl`：实际访问地址，管理员登录会校验协议、地址和端口；修改端口时同步修改。
 - 两个数据目录可保持默认，不需要手动创建。
-- `trackingEnabled: true`：接收工作助手运营打点；正常生产启动也生效，当前采集无需 Token。工作助手 collectionOrigin 配置实际官网地址，environment 保持 production。采集另写 analyticsDirectory（默认 ../.runtime/website-analytics），管理员查看统计仍需登录。详见 [运营统计部署](operational-tracking.md)。
+- `trackingEnabled: true`：接收工作助手运营打点；正常生产启动也生效，当前采集无需 Token。工作助手 collectionOrigin 配置实际官网地址，environment 保持 production。运营数据写 ClickHouse，analyticsDirectory（默认 ../.runtime/website-analytics）保存锁和待提交记录，管理员查看统计仍需登录。详见 [运营统计部署](operational-tracking.md)。
 
 受控公司内网需要直接通过服务器 IP 访问时，可改为：
 
@@ -67,6 +67,8 @@ pnpm build
 替换成服务器实际网卡 IP，并允许需要访问的内网电脑连接 TCP 4173。`websiteUrl` 使用纯 URL；`host` 也可用 `0.0.0.0` 监听所有 IPv4 网卡，但浏览器仍应使用实际 IP。HTTP 不加密传输；公网部署使用 HTTPS 网关。配置 HTTPS 地址本身不会让 Node 自动提供 TLS。
 
 如果设置了 `DSH_OPS_WEBSITE_CONFIG`，则使用该变量指定的配置文件。旧配置中的 `trackingDevelopment` 已移除，请删除该字段；运营采集只保留 `trackingEnabled`。配置修改后需重启服务。
+
+启动前还需按 [ClickHouse 单库切换与补数](clickhouse-migration.md) 配置 ClickHouse 密码环境变量并执行 `pnpm tracking init`。已有 SQLite 数据按该手册离线补数。运营存储只使用 ClickHouse，即使关闭采集仍需连接数据库以提供管理查询。
 
 ## 4. 设置管理员密码并启动
 

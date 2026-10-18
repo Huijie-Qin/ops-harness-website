@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import { ReleaseConfigSchema } from '@dsh-ops/release-contract'
+import { AnalyticsConfigSchema } from './tracking/config.js'
 import { normalizeWebsiteUrl } from './website-url.js'
 
 const WebsiteConfigSchema = ReleaseConfigSchema.extend({
@@ -12,6 +13,7 @@ const WebsiteConfigSchema = ReleaseConfigSchema.extend({
       return z.NEVER
     }
   }),
+  analytics: AnalyticsConfigSchema,
   analyticsDirectory: z.string().min(1).default('../.runtime/website-analytics'),
   trackingEnabled: z.boolean().default(false),
   contentDirectory: z.string().refine(value => value.trim().length > 0),

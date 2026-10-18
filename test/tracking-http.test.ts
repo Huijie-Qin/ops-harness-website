@@ -1,4 +1,5 @@
-import test, { type TestContext } from 'node:test'
+import { integrationTest as test, createTestStore } from './helpers/clickhouse.js'
+import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -6,14 +7,13 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { TrackingStore } from '../server/tracking/store.js'
 import { createTrackingHandlers } from '../server/tracking/http.js'
 import { createGuideHandler } from '../server/guide-http.js'
 import { GuideStore } from '../server/guide-store.js'
 
 async function fixture(t: TestContext, enabled: boolean, defaultEnvironment: 'development' | 'production' = 'development', remoteAddress?: string) {
   const root = await mkdtemp(path.join(tmpdir(), 'tracking-http-'))
-  const store = new TrackingStore(path.join(root, 'analytics'))
+  const store = await createTestStore(path.join(root, 'analytics'))
   const tracking = createTrackingHandlers(store, { enabled, defaultEnvironment })
   let origin = ''
   let guide: Awaited<ReturnType<typeof createGuideHandler>>

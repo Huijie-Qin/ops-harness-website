@@ -1,0 +1,31 @@
+<clickhouse>
+  <users>
+    <default remove="remove" />
+    <analytics_admin>
+      <password from_env="CH_ADMIN_PASSWORD" />
+      <networks><ip>::/0</ip></networks>
+      <profile>default</profile><quota>default</quota>
+      <grants><query>GRANT ALL ON *.* WITH GRANT OPTION</query></grants>
+    </analytics_admin>
+    <analytics_writer>
+      <password from_env="CH_WRITER_PASSWORD" />
+      <networks><ip>::/0</ip></networks>
+      <profile>default</profile><quota>default</quota>
+      <grants>
+        <query>GRANT SELECT, INSERT ON website_analytics_dual.*</query>
+        <query>GRANT SELECT, INSERT ON website_analytics_primary.*</query>
+        <query>GRANT SELECT ON system.disks</query>
+      </grants>
+    </analytics_writer>
+    <analytics_reader>
+      <password from_env="CH_READER_PASSWORD" />
+      <networks><ip>::/0</ip></networks>
+      <profile>analytics_readonly</profile><quota>default</quota>
+      <grants>
+        <query>GRANT SELECT ON website_analytics_dual.*</query>
+        <query>GRANT SELECT ON website_analytics_primary.*</query>
+      </grants>
+    </analytics_reader>
+  </users>
+  <profiles><analytics_readonly><readonly>2</readonly></analytics_readonly></profiles>
+</clickhouse>
