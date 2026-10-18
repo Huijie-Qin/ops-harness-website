@@ -126,6 +126,10 @@ SQLite 的 11 张业务表没有统一的创建/更新时间，具体规则如�
 
 ## 中断处理
 
+- **没有 `step: starting` 就退出**：失败发生在参数解析或配置读取/校验阶段，尚未连接 ClickHouse。错误日志带 `stage`，配置错误另带实际 `configPath`；`WEBSITE_CONFIG_INVALID` 的 `issues` 只列字段名、校验类别及不支持的字段名，不打印字段值。请用 `pnpm tracking init --config /实际路径/website.json` 明确选择完整配置。
+- `WEBSITE_CONFIG_ENOENT` / `WEBSITE_CONFIG_ENOTDIR`：核对日志中的配置路径；`WEBSITE_CONFIG_EISDIR` 表示传了目录而非文件；`WEBSITE_CONFIG_EACCES` / `WEBSITE_CONFIG_EPERM` 表示当前 Linux 用户无权读取。
+- `WEBSITE_CONFIG_INVALID_JSON`：修正 JSON 语法，不使用注释或尾逗号。`WEBSITE_CONFIG_INVALID`：按 `issues.field` 修正字段；`unrecognized_keys` 的 `keys` 需移除或按本手册迁移，尤其是旧 `analytics.writeBackend` / `readBackend` / `dual` / `query` / `clickhousePrimary`。不要删除现有 ClickHouse 连接配置；密码只填环境变量名，超时应为数字。
+- `WEBSITE_CONFIG_LEGACY_ENV`：改用 `DSH_OPS_WEBSITE_CONFIG` 或 `--config`，不能仅设置旧 `DSH_OPS_RELEASE_CONFIG` / `DSH_OPS_WEBSITE_CONTENT_CONFIG`。`WEBSITE_CONFIG_LOAD_FAILED` 是尚未归类的配置异常，需要保留日志中的阶段和路径继续定位。
 - 网络或 ClickHouse 写入失败：解决连接/权限问题后重跑同一命令。每批先恢复未完成提交，再继续补数；不要删除 `clickhouse-pending.json`。
 - `SINCE_REQUIRED` / `SINCE_MUST_BE_ISO_TIMESTAMP_WITH_TIMEZONE`：补上带 `Z` 或 `+08:00` 等明确时区的 `--since` 时间。
 - `TRACKING_TIMEOUT_MUST_BE_1000_TO_300000_MS`：`--timeout-ms` 必须为 1000–300000 范围内的整数毫秒。

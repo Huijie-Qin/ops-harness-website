@@ -22,7 +22,7 @@ const WebsiteConfigSchema = ReleaseConfigSchema.extend({
 
 export async function loadConfig(configPath = process.env.DSH_OPS_WEBSITE_CONFIG) {
   if (configPath === undefined && (process.env.DSH_OPS_RELEASE_CONFIG !== undefined || process.env.DSH_OPS_WEBSITE_CONTENT_CONFIG !== undefined)) {
-    throw new Error('Website configuration has been merged. Set DSH_OPS_WEBSITE_CONFIG to a complete website.json instead of DSH_OPS_RELEASE_CONFIG or DSH_OPS_WEBSITE_CONTENT_CONFIG.')
+    throw Object.assign(new Error('Website configuration has been merged. Set DSH_OPS_WEBSITE_CONFIG to a complete website.json instead of DSH_OPS_RELEASE_CONFIG or DSH_OPS_WEBSITE_CONTENT_CONFIG.'), { code: 'WEBSITE_CONFIG_LEGACY_ENV' })
   }
   const absolute = path.resolve(configPath ?? 'config/website.json')
   const raw = await readFile(absolute, 'utf8')

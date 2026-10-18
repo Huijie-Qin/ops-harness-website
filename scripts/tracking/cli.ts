@@ -7,7 +7,9 @@ import { TrackingDatabase } from '../../server/tracking/database.js'
 import { acquireTrackingLock } from '../../server/tracking/lock.js'
 import { parseBackfillSince } from './backfill-time.js'
 import { parseTrackingTimeout, trackingAnalyticsConfig } from './resources.js'
+import { trackingCommandFailure, type TrackingCommandContext } from './errors.js'
 
+const context: TrackingCommandContext = { stage: 'arguments' }
 async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string' }, sqlite: { type: 'string' }, since: { type: 'string' }, 'batch-size': { type: 'string' }, 'timeout-ms': { type: 'string' }, help: { type: 'boolean' } } })
   if (values.help) {
@@ -18,19 +20,24 @@ async function main() {
   if (command === 'backfill' && !values.sqlite) throw new Error('SQLITE_SOURCE_REQUIRED')
   const since = command === 'backfill' ? parseBackfillSince(values.since) : undefined
   const timeoutMs = parseTrackingTimeout(values['timeout-ms'])
+  context.stage = 'config'
+  context.configPath = path.resolve(values.config ?? process.env.DSH_OPS_WEBSITE_CONFIG ?? 'config/website.json')
   const config = await loadConfig(values.config)
   const analytics = trackingAnalyticsConfig(config.analytics, timeoutMs)
   console.log(JSON.stringify({ step: 'starting', command, heapLimitMiB: Math.floor(getHeapStatistics().heap_size_limit / 1024 / 1024), requestTimeoutMs: analytics.clickhouse.requestTimeoutMs, queryTimeoutMs: analytics.queryTimeoutMs, ...(since ? { since } : {}) }))
   if (command === 'init') {
+    context.stage = 'lock'
     const unlock = acquireTrackingLock(config.analyticsDirectory, 'clickhouse-init')
     const connection = analytics.clickhouse
     const client = new ClickHouseHttpClient({ ...connection, writerUser: connection.adminUser, writerPasswordEnv: connection.adminPasswordEnv })
     try {
+      context.stage = 'init'
       const state = await initializeClickHouse(client)
       console.log(JSON.stringify({ step: 'initialized', database: connection.database, epoch: state.epoch, startSeq: state.startSeq }))
     } finally { client.close(); unlock() }
     return
   }
+  context.stage = 'backfill'
   const store = new TrackingDatabase(config.analyticsDirectory, analytics)
   try {
     await store.ready
@@ -45,7 +52,5 @@ async function main() {
   } finally { await store.close() }
 }
 main().catch(error => {
-  const code = error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message) ? error.message : 'TRACKING_COMMAND_FAILED'
-  const diagnostics = error && typeof error === 'object' && 'diagnostics' in error ? error.diagnostics : undefined
-  console.error(JSON.stringify({ error: code, ...(diagnostics ? { diagnostics } : {}) })); process.exitCode = 1
+  console.error(JSON.stringify(trackingCommandFailure(error, context))); process.exitCode = 1
 })
