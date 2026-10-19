@@ -1,0 +1,20 @@
+{
+  "name": "@dsh-ops/skill-contract",
+  "version": "0.1.0",
+  "sourceRepository": "ops-harness",
+  "sourceCommit": "efcdb04d02d9b10fabcdbeee5aef101d01c9b8fa",
+  "sourceWorkingTree": false,
+  "sourcePath": "packages/shared/skill-contract",
+  "artifact": "dsh-ops-skill-contract-0.1.0-d501c182c4b9.tgz",
+  "sha256": "d501c182c4b9f94f5fb0dc7cfe75faa018ca508d74c6a4255cc40b408c7fb91a",
+  "sourceSha256": {
+    "package.json": "655bf0477b426a7b6e989754d877fb42697cac180c8dd7966ac9ebc8d17aee72",
+    "tsconfig.json": "2501835bf561f241360b84bef8fa308c37bb4b078d14b4a47efa928f4b9f47ad",
+    "README.md": "ae1604ba250bcda17d435888ce868ae109b4d45b37479971fe4c4f32c39221dd",
+    "src/index.ts": "3b6715e2c51deed97f434774554f1c7fc6542550aeca4414ce955b6c6cda09b0",
+    "src/tree.ts": "332c1ef6191f96477fdb26df2081e11d677a269955a0cf535067b8552add2e57",
+    "src/normalize.ts": "3ae2399f473a093cf203088f11e720c4ffe562698dc37e205c74cb6e18c27461",
+    "src/portable-path.ts": "63a28441f2b0737167846e4d5065efca33620a1550632f8561c9ad361fa127db"
+  },
+  "packageManager": "pnpm@11.19.0"
+}

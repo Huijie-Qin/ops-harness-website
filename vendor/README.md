@@ -28,6 +28,18 @@ pnpm --dir packages/shared/release-contract pack --pack-destination /path/to/ops
 安装包与契约版本。更新时在产品仓库完成契约 build/test 后 pack 到 vendor，以内容哈希命名新制品，更新 package.json、来源清单
 与锁文件，再执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。
 
+## 技能规则包
+
+`dsh-ops-skill-contract-<版本>-<sha256前12位>.tgz` 来自产品仓库 `packages/shared/skill-contract` 的 pnpm pack：单个技能的严格规则（`./tree`，
+按 DSH 读取技能的方式判断 `SKILL.md` 信息块）、「我的技能」导入用的修复模块（`./normalize`）与可移植路径规则（`./portable-path`），只依赖精确版本的
+`yaml`。官网检查技能（导入专家包、手动上传、发布复查、巡检脚本）与上传时的自动修复都用它；专家分发契约里旧的 `./skill-tree` 不再被官网使用。
+
+当前为 0.1.0：输入已逐文件核对，与产品提交 efcdb04d（分支 `claude/jolly-lederberg-864208`，尚未合入产品主线）的源码一致
+（`sourceWorkingTree: false`），从该提交重新 pack 得到的制品与此逐字节相同。来源见 [skill-contract.json](skill-contract.json)，
+`test/standalone.test.ts` 核对制品、安装包与规则行为。更新时在产品仓库完成规则包 build/test 后 pack 到 vendor，以内容哈希命名新制品，
+更新 package.json、来源清单与锁文件，再执行官网 `pnpm install --no-frozen-lockfile` 与 check/build。改了规则包里的规则时，同步递增官网
+`server/expert-skill.ts` 的 `SKILL_RULES_VERSION`，发布时才会复查旧技能。
+
 ## 运营打点协议
 
 `dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz` 来自产品仓库 `packages/shared/tracking-contract` 的 pnpm pack。它只依赖精确版本 zod，官网从 `@dsh-ops/tracking-contract` 根入口读取事件契约，不安装或加载 DSH、Cordis、Host 插件及其私有依赖。契约目录版本 4，事件/批次 schemaVersion 仍为 1，支持 WeLink 姓名、部门及资料查询时间。产品原 `@dsh-ops/tracking/contracts` 仅转导出此唯一契约源码以保持兼容。

@@ -6,12 +6,17 @@ import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createServer } from 'node:http'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
 import { GuideStore, encodeChapter } from '../server/guide-store.js'
 import { MediaStore } from '../server/media-store.js'
 import { ReleaseAdmin } from '../server/release-admin.js'
 import { KnowledgeStore } from '../server/knowledge-store.js'
 import { ExpertStore } from '../server/expert-store.js'
+import { checkExpertSkill } from '../server/expert-skill.js'
+import { extractArchiveEntry, readArchive } from '../server/knowledge-store.js'
 import { createAdminHandler } from '../server/admin-http.js'
 import { createGuideHandler } from '../server/guide-http.js'
 import { createHandler } from '../server/app.js'
@@ -415,7 +420,8 @@ test('a Skill that breaks the shared rules is refused with the rule and the limi
   let { revision } = await created.json()
   const refused = await f.upload('/api/admin/experts/push-ops/skills?name=bad.zip', archive([{ name: 'bad/SKILL.md', data: Buffer.from('# 没有开头的信息块\n') }]), { 'X-Revision': revision })
   assert.equal(refused.status, 400)
-  assert.deepEqual(await refused.json(), { error: 'INVALID_EXPERT_SKILL', issues: ['SKILL.md 开头缺少用 --- 包起来的 name 与 description，或格式不正确'] })
+  // Repaired first: the missing block is added, and what only the author can write is asked for.
+  assert.deepEqual(await refused.json(), { error: 'INVALID_EXPERT_SKILL', issues: ['SKILL.md 缺少 description（一句话说明这个技能做什么、什么时候用）。请补上后再上传。'] })
   const large = archive([{ name: 'large-data/SKILL.md', data: manifestOf('large-data') }, { name: 'large-data/data.bin', data: randomBytes(6 * 1024 * 1024) }])
   const accepted = await f.upload('/api/admin/experts/push-ops/skills?name=large-data.zip', large, { 'X-Revision': revision })
   assert.equal(accepted.status, 200)
@@ -854,4 +860,231 @@ test('a Skill carrying node_modules, a lock file and .git imports, without them 
   assert.equal(uploaded.status, 200)
   const { preview } = await uploaded.json()
   assert.deepEqual(preview.errors, [])
+})
+
+// ---- 上传单个技能：先修再查（2026-10-16） ----------------------------------------------------------
+
+// One Skill an admin uploads is first repaired with the module the product's 我的技能 repairs with
+// (`@dsh-ops/skill-contract/normalize`), then checked by the rules every receiver applies; whenever the stored file
+// differs from the upload, the upload is kept for the admin. An expert package is still only checked.
+const skillArchive = (folder: string, manifest: string | Buffer, extra: { name: string; data?: Buffer }[] = []) => archive([
+  { name: `${folder}/SKILL.md`, data: typeof manifest === 'string' ? Buffer.from(manifest, 'utf8') : manifest },
+  ...extra.map(file => ({ ...file, name: `${folder}/${file.name}` })),
+])
+const storedSkill = (f: Awaited<ReturnType<typeof fixture>>, skill: { sha256: string; kind: string }) =>
+  readFile(path.join(f.content, 'experts', 'skills', `${skill.sha256}.${skill.kind}`))
+const manifestText = (bytes: Buffer) => extractArchiveEntry(bytes, readArchive(bytes).find(entry => entry.name === 'SKILL.md')!).toString('utf8')
+async function draftOnly(f: Awaited<ReturnType<typeof fixture>>) {
+  const created = await f.json('/api/admin/experts', { id: 'push-ops', draft: draft(), revision: (await f.list()).revision })
+  assert.equal(created.status, 200)
+  return (await created.json()).revision as string
+}
+const skillUrl = (fileName: string, skillName?: string) =>
+  `/api/admin/experts/push-ops/skills?name=${encodeURIComponent(fileName)}${skillName === undefined ? '' : `&skillName=${encodeURIComponent(skillName)}`}`
+
+test('an uploaded Skill is repaired before it is checked, and the upload is kept for the admin', async t => {
+  const f = await fixture(t)
+  let revision = await draftOnly(f)
+  const upload = skillArchive('Weekly_Report', '---\nname: Weekly_Report\ndescription: 周报: 每周五汇总本周进展\ndisableModelInvocation: true\n---\n\n# 周报助手\n\n按模板汇总。\n', [
+    { name: 'references/template.md', data: Buffer.from('# 模板\n') },
+    { name: '.DS_Store', data: Buffer.from('mac') },
+  ])
+  const response = await f.upload(skillUrl('Weekly_Report.zip'), upload, { 'X-Revision': revision })
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  revision = body.revision
+  assert.equal(body.skill.name, 'weekly-report')
+  assert.equal(body.skill.displayName, 'Weekly_Report')
+  assert.equal(body.skill.replaced, false)
+  assert.deepEqual(body.skill.fixes, [
+    '已给含冒号的字段（description）加上引号。',
+    '已把 disableModelInvocation 改为标准写法 disable-model-invocation。',
+    'name「Weekly_Report」不符合技能命名规则（小写英文、数字、短横线），已改为 weekly-report；原名保留为显示名。',
+    '跳过了 1 个不属于技能的文件（Weekly_Report/.DS_Store），使用者那边也不需要它们。',
+  ])
+  const entry = body.expert.draft.skills.find((skill: { name: string }) => skill.name === 'weekly-report')
+  assert.equal(entry.checkedWith, 'skill-contract@0.1.0')
+  assert.equal(entry.displayName, 'Weekly_Report')
+  assert.deepEqual(entry.fixes, body.skill.fixes)
+  assert.deepEqual(entry.original, { sha256: sha(upload), size: upload.length, kind: 'zip', fileName: 'Weekly_Report.zip' })
+
+  // Distributed: the repaired Skill at the archive root, without what is never content.
+  const stored = await storedSkill(f, entry)
+  assert.equal(sha(stored), entry.sha256)
+  assert.deepEqual(readArchive(stored).map(item => item.name), ['SKILL.md', 'references/template.md'])
+  const check = checkExpertSkill(stored, 'zip')
+  assert.deepEqual([check.name, check.description, check.displayName], ['weekly-report', '周报: 每周五汇总本周进展', 'Weekly_Report'])
+  assert.match(manifestText(stored), /^disable-model-invocation: true$/m)
+  assert.doesNotMatch(manifestText(stored), /disableModelInvocation/)
+
+  // The upload as it came, for the admin only.
+  const originalUrl = `${f.origin}/api/admin/experts/push-ops/skills/weekly-report/original`
+  const original = await fetch(originalUrl, { headers: f.headers })
+  assert.equal(original.status, 200)
+  assert.match(original.headers.get('content-disposition') ?? '', /Weekly_Report\.zip/)
+  assert.equal(Buffer.compare(Buffer.from(await original.arrayBuffer()), upload), 0)
+  assert.equal((await fetch(originalUrl)).status, 401)
+
+  // A save keeps what the upload recorded; the page cannot point a Skill at another original.
+  const forged = { ...entry, displayName: '伪造', original: { sha256: 'f'.repeat(64), size: 1, kind: 'zip', fileName: 'x.zip' }, fixes: ['伪造'], checkedWith: 'skill-contract@9.9.9' }
+  const saved = await f.json('/api/admin/experts/push-ops', { draft: draft({ skills: [forged] }), revision }, 'PUT')
+  assert.equal(saved.status, 200)
+  const savedBody = await saved.json()
+  revision = savedBody.revision
+  assert.deepEqual(savedBody.expert.draft.skills, [entry])
+
+  // The same file again replaces the Skill; a clean upload is stored as it came, with nothing kept beside it.
+  const again = await (await f.upload(skillUrl('Weekly_Report.zip'), upload, { 'X-Revision': revision })).json()
+  assert.equal(again.skill.replaced, true)
+  const clean = skillZip('push-copywriting')
+  const plain = await (await f.upload(skillUrl('push-copywriting.zip'), clean, { 'X-Revision': again.revision })).json()
+  assert.deepEqual(plain.skill, { name: 'push-copywriting', fixes: [], replaced: false })
+  const plainEntry = plain.expert.draft.skills.find((skill: { name: string }) => skill.name === 'push-copywriting')
+  assert.equal(plainEntry.sha256, sha(clean))
+  assert.deepEqual([plainEntry.original, plainEntry.fixes, plainEntry.displayName], [undefined, undefined, undefined])
+  assert.equal((await fetch(`${f.origin}/api/admin/experts/push-ops/skills/push-copywriting/original`, { headers: f.headers })).status, 404)
+
+  // Published, the repaired file is what employees download.
+  const published = await f.json('/api/admin/experts/push-ops/publish', { revision: plain.revision })
+  assert.equal(published.status, 200)
+  const download = await fetch(`${f.origin}/api/experts/v1/experts/push-ops/versions/1/skills/weekly-report`, { headers: { 'X-Ops-Employee-Id': owner.employeeId } })
+  assert.equal(download.status, 200)
+  assert.equal(sha(Buffer.from(await download.arrayBuffer())), entry.sha256)
+})
+
+test('a name that cannot become a Skill name is asked for, and the same file goes again with it', async t => {
+  const f = await fixture(t)
+  let revision = await draftOnly(f)
+  const chinese = skillArchive('周报', '---\nname: 周报助手\ndescription: 每周五汇总本周进展\n---\n\n# 周报助手\n')
+  const asked = await f.upload(skillUrl('周报.zip'), chinese, { 'X-Revision': revision })
+  assert.equal(asked.status, 422)
+  assert.deepEqual(await asked.json(), {
+    error: 'SKILL_NAME_REQUIRED', issues: ['name「周报助手」不能直接用作技能名，请填写一个英文名（小写英文、数字和短横线）。'], details: { suggestion: '' },
+  })
+  const invalid = await f.upload(skillUrl('周报.zip', 'Weekly_Digest'), chinese, { 'X-Revision': revision })
+  assert.equal(invalid.status, 400)
+  assert.equal((await invalid.json()).error, 'INVALID_SKILL_NAME')
+  const named = await f.upload(skillUrl('周报.zip', 'weekly-digest'), chinese, { 'X-Revision': revision })
+  assert.equal(named.status, 200)
+  const body = await named.json()
+  revision = body.revision
+  assert.deepEqual(body.skill, { name: 'weekly-digest', displayName: '周报助手', fixes: ['name「周报助手」已按填写的英文名改为 weekly-digest；原名保留为显示名。'], replaced: false })
+  assert.equal(checkExpertSkill(await storedSkill(f, body.expert.draft.skills[0]), 'zip').displayName, '周报助手')
+
+  // The folder, else the file name, gives the suggestion when it can be one.
+  const folder = await f.upload(skillUrl('team.zip'), skillArchive('team-weekly', '---\nname: 团队周报\ndescription: 团队每周汇总\n---\n'), { 'X-Revision': revision })
+  assert.equal(folder.status, 422)
+  assert.equal((await folder.json()).details.suggestion, 'team-weekly')
+  const nameless = Buffer.from('---\ndescription: 记录会议要点\n---\n\n# 会议纪要\n', 'utf8')
+  const unnamed = await f.upload(skillUrl('meeting-notes.md'), nameless, { 'X-Revision': revision })
+  assert.equal(unnamed.status, 422)
+  assert.deepEqual(await unnamed.json(), {
+    error: 'SKILL_NAME_REQUIRED', issues: ['SKILL.md 缺少 name，请填写一个英文名（小写英文、数字和短横线）。'], details: { suggestion: 'meeting-notes' },
+  })
+  const given = await (await f.upload(skillUrl('meeting-notes.md', 'meeting-notes'), nameless, { 'X-Revision': revision })).json()
+  assert.deepEqual(given.skill, { name: 'meeting-notes', displayName: '会议纪要', fixes: ['SKILL.md 缺少 name，已按填写的英文名命名为 meeting-notes。'], replaced: false })
+  const md = given.expert.draft.skills.find((skill: { name: string }) => skill.name === 'meeting-notes')
+  assert.equal(md.kind, 'md')
+  assert.match((await storedSkill(f, md)).toString('utf8'), /^name: meeting-notes$/m)
+
+  // What the author has to change comes first; the name is asked for once the file is otherwise fine.
+  const both = await f.upload(skillUrl('周报.zip'), skillArchive('周报', '---\nname: 周报助手\n---\n\n# 周报助手\n'), { 'X-Revision': given.revision })
+  assert.equal(both.status, 400)
+  assert.deepEqual(await both.json(), { error: 'INVALID_EXPERT_SKILL', issues: ['SKILL.md 缺少 description（一句话说明这个技能做什么、什么时候用）。请补上后再上传。'] })
+})
+
+test('GBK text, names Windows cannot hold, a name written as a block and a misplaced folder are fixed on upload', async t => {
+  const f = await fixture(t)
+  let revision = await draftOnly(f)
+  const upload = async (fileName: string, bytes: Buffer) => {
+    const response = await f.upload(skillUrl(fileName), bytes, { 'X-Revision': revision })
+    assert.equal(response.status, 200, fileName)
+    const body = await response.json()
+    revision = body.revision
+    const entry = body.expert.draft.skills.find((skill: { name: string }) => skill.name === body.skill.name)
+    return { fixes: body.skill.fixes as string[], entry, stored: await storedSkill(f, entry) }
+  }
+  // 周报 in GBK, as Notepad on a Chinese Windows saves it.
+  const gbk = await upload('weekly-gbk.zip', skillArchive('weekly-gbk', Buffer.concat([Buffer.from('---\nname: weekly-gbk\ndescription: '), Buffer.from([0xd6, 0xdc, 0xb1, 0xa8]), Buffer.from('\n---\n\n# Usage\n')])))
+  assert.deepEqual(gbk.fixes, ['SKILL.md 不是 UTF-8 编码，已按 GBK 转换为 UTF-8。'])
+  assert.equal(checkExpertSkill(gbk.stored, 'zip').description, '周报')
+
+  const windows = await upload('weekly-win.zip', skillArchive('weekly-win', '---\nname: weekly-win\ndescription: 周报\n---\n\n见 [模板](references/a:b.md)。\n', [{ name: 'references/a:b.md', data: Buffer.from('# 模板\n') }]))
+  assert.equal(windows.fixes.length, 1)
+  const names = readArchive(windows.stored).map(item => item.name)
+  assert.equal(names.length, 2)
+  assert.ok(names.every(name => !/[:*?"<>|]/.test(name)), names.join())
+  assert.match(manifestText(windows.stored), new RegExp(`\\(${names.find(name => name !== 'SKILL.md')!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`))
+
+  const block = await upload('weekly-block.zip', skillArchive('weekly-block', '---\nname: |\n  weekly-block\ndescription: 周报\n---\n'))
+  assert.deepEqual(block.fixes, ['name 前后有多余的空格或换行（例如写成了 name: | 多行），已整理为 weekly-block。'])
+  assert.match(manifestText(block.stored), /^name: weekly-block$/m)
+
+  // A Skill in a folder not named after it is only packed again, its content unchanged.
+  const folder = await upload('weekly.zip', skillArchive('weekly', '---\nname: weekly-folder\ndescription: 周报\n---\n'))
+  assert.deepEqual(folder.fixes, ['技能文件原来在压缩包的「weekly」文件夹里，已放到压缩包根目录重新打包，内容不变。'])
+  assert.equal(manifestText(folder.stored), '---\nname: weekly-folder\ndescription: 周报\n---\n')
+  assert.ok(folder.entry.original)
+})
+
+test('an expert package is only checked: a Skill DSH would skip is refused with what to change', async t => {
+  const f = await fixture(t)
+  const refused = async (manifest: string) => {
+    const response = await f.upload('/api/admin/experts/import', expertPackage({ skills: [{ name: 'push-copywriting', bytes: skillArchive('push-copywriting', manifest) }] }))
+    assert.equal(response.status, 400)
+    const body = await response.json()
+    assert.equal(body.error, 'INVALID_EXPERT_PACKAGE')
+    return body.issues as string[]
+  }
+  assert.deepEqual(await refused('---\nname: |\n  push-copywriting\ndescription: 撰写推送文案\n---\n'),
+    ['技能「push-copywriting」：SKILL.md 的 name 前后有空格或换行（例如写成了 name: | 多行），工作助手读不到这个技能，请写成一行：name: push-copywriting'])
+  assert.deepEqual(await refused('---\nname: push-copywriting\ndescription: 撰写推送文案\nuserInvocable: false\n---\n'),
+    ['技能「push-copywriting」：SKILL.md 的 userInvocable 是旧写法，工作助手读不到这个技能，请改成 user-invocable'])
+  assert.deepEqual(await refused('---\nname: push-copywriting\ndescription: 撰写推送文案\ndisable-model-invocation: maybe\n---\n'),
+    ['技能「push-copywriting」：SKILL.md 的 disable-model-invocation 只能是 true 或 false，否则工作助手读不到这个技能'])
+})
+
+test('publishing re-checks a Skill stored under older rules, and the audit names it with the way out', async t => {
+  const f = await fixture(t)
+  await draftOnly(f)
+  // What an upload stored before 2026-10-16 could hold: a name written as a block, and no rules marker.
+  const old = skillArchive('push-copywriting', '---\nname: |\n  push-copywriting\ndescription: 撰写推送文案\n---\n\n# 用法\n')
+  const oldEntry = { name: 'push-copywriting', sha256: sha(old), size: old.length, kind: 'zip', required: true, fileName: 'push-copywriting.zip' }
+  await mkdir(path.join(f.content, 'experts', 'skills'), { recursive: true })
+  await writeFile(path.join(f.content, 'experts', 'skills', `${sha(old)}.zip`), old)
+  const catalogPath = path.join(f.content, 'experts', 'catalog.json')
+  const document = JSON.parse(await readFile(catalogPath, 'utf8'))
+  document.experts[0].draft.skills = [oldEntry]
+  await writeFile(catalogPath, JSON.stringify(document))
+
+  const problem = 'SKILL.md 的 name 前后有空格或换行（例如写成了 name: | 多行），工作助手读不到这个技能，请写成一行：name: push-copywriting'
+  const refused = await f.json('/api/admin/experts/push-ops/publish', { revision: (await f.list()).revision })
+  assert.equal(refused.status, 400)
+  assert.deepEqual(await refused.json(), { error: 'EXPERT_NOT_PUBLISHABLE', issues: [`技能「push-copywriting」：${problem}。请重新上传这个技能，上传时会自动修好能修的问题`] })
+  const row = { expertId: 'push-ops', where: 'draft', name: 'push-copywriting', problems: [problem], repairable: true, needsName: false }
+  assert.deepEqual(await f.experts.auditSkills(), [row])
+
+  // The audit as operators run it: read only, one line per Skill, a non-zero exit while there is something to do.
+  const config = path.join(f.root, 'website.json')
+  await writeFile(config, JSON.stringify({ schemaVersion: 1, websiteUrl: 'http://127.0.0.1:4197', host: '127.0.0.1', port: 4197, releaseDirectory: path.join(f.root, 'releases'), contentDirectory: f.content, adminPasswordEnv: 'DSH_OPS_WEBSITE_ADMIN_PASSWORD' }))
+  const before = await readFile(catalogPath)
+  const audit = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'scripts/audit-expert-skills.ts', '--config', config], { cwd: fileURLToPath(new URL('../', import.meta.url)), timeout: 60_000 })
+    .then(() => assert.fail('the audit should report the Skill'), (error: { code: number; stdout: string }) => error)
+  assert.equal(audit.code, 1)
+  assert.equal(audit.stdout, `1 处技能不符合当前规则：\n- push-ops（草稿）技能「push-copywriting」：${problem} → 重新上传同一个文件即可自动修好\n`)
+  assert.equal(Buffer.compare(await readFile(catalogPath), before), 0)
+
+  // Uploading the same file again repairs it, and the draft publishes.
+  const repaired = await f.upload(skillUrl('push-copywriting.zip'), old, { 'X-Revision': (await f.list()).revision })
+  assert.equal(repaired.status, 200)
+  const published = await f.json('/api/admin/experts/push-ops/publish', { revision: (await repaired.json()).revision })
+  assert.equal(published.status, 200)
+  assert.deepEqual(await f.experts.auditSkills(), [])
+
+  // A published version is audited too (read by a fresh store: snapshots are cached).
+  const snapshotPath = path.join(f.content, 'experts', 'versions', 'push-ops', '1.json')
+  const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8'))
+  snapshot.content.skills = [oldEntry]
+  await writeFile(snapshotPath, JSON.stringify(snapshot))
+  assert.deepEqual(await new ExpertStore(f.content).auditSkills(), [{ ...row, where: 'v1' }])
 })

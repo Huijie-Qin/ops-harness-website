@@ -14,6 +14,9 @@ importers:
       '@dsh-ops/release-contract':
         specifier: file:vendor/dsh-ops-release-contract-0.1.3.tgz
         version: file:vendor/dsh-ops-release-contract-0.1.3.tgz
+      '@dsh-ops/skill-contract':
+        specifier: file:vendor/dsh-ops-skill-contract-0.1.0-d501c182c4b9.tgz
+        version: file:vendor/dsh-ops-skill-contract-0.1.0-d501c182c4b9.tgz
       '@dsh-ops/tracking-contract':
         specifier: file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz
         version: file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz
@@ -84,6 +87,10 @@ packages:
   '@dsh-ops/release-contract@file:vendor/dsh-ops-release-contract-0.1.3.tgz':
     resolution: {integrity: sha512-VbY4EIZ0x+rZeyIpOeO/Siq0BpJtdP4yi3r9xBN+SpAcEvw6RtjOoIrLwqaC9x2FqAk391AInW+ksR66FegKlw==, tarball: file:vendor/dsh-ops-release-contract-0.1.3.tgz}
     version: 0.1.3
+
+  '@dsh-ops/skill-contract@file:vendor/dsh-ops-skill-contract-0.1.0-d501c182c4b9.tgz':
+    resolution: {integrity: sha512-RtbMlgXOmCTLIlu3ruTTWF2Mxk2kga+CX5WHk3EJ8ffLoWKHWlj3kekZvqax3iN91sutVaeje8a8pwQ//FO+Lw==, tarball: file:vendor/dsh-ops-skill-contract-0.1.0-d501c182c4b9.tgz}
+    version: 0.1.0
 
   '@dsh-ops/tracking-contract@file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz':
     resolution: {integrity: sha512-iVujjqD7ZYyAfNU5zyXv7nN9a/Bq5UukbQOk1txcBowABF37BcFxeOsL/3+F1sCkKkuZe94mP9Hcl+xtdbU42Q==, tarball: file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz}
@@ -674,6 +681,10 @@ snapshots:
     dependencies:
       semver: 7.8.5
       zod: 4.4.3
+
+  '@dsh-ops/skill-contract@file:vendor/dsh-ops-skill-contract-0.1.0-d501c182c4b9.tgz':
+    dependencies:
+      yaml: 2.9.0
 
   '@dsh-ops/tracking-contract@file:vendor/dsh-ops-tracking-contract-0.1.0-f76676da1bb6.tgz':
     dependencies:
