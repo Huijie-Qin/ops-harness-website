@@ -4,7 +4,7 @@ import { userSortKeys } from '../../shared/analytics.js'
 import { BatchSchema, MAX_BATCH_BYTES } from '@dsh-ops/tracking-contract'
 import { GuideError } from '../guide-store.js'
 import type { AdminHandler } from '../admin-files.js'
-import { dayAt, type Installation } from './database.js'
+import { dayAt, type Installation } from './types.js'
 import type { TrackingStore } from './store.js'
 export type TrackingHttpConfig = { enabled: boolean; defaultEnvironment: 'development' | 'production' }
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v => Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0,10) === v)
