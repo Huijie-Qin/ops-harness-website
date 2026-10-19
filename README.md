@@ -316,10 +316,15 @@ GitHub 的 `Website checks` workflow 自动执行冻结安装、类型检查、�
 
 ## 运营统计
 
-管理员 `/admin` 新增“运营统计”，支持登录人数、DAU/近30天MAU、用户明细与排名、功能使用和操作明细。独立 SQLite 与采集 API 不改变普通 logger。本地 `pnpm dev` 开放免认证采集，产品开发 overlay 默认上传至 `http://127.0.0.1:4173`，无需 Token 环境变量。未取得 WeLink 工号时保持匿名。部署时显式配置 `trackingEnabled: true`，正常 `pnpm start` 即可接收远程 Host 的 production/development/test 批次；采集认证后续实现，管理员登录保持原规则。详见 [运营统计部署](docs/runbooks/operational-tracking.md) 和 [ADR 0019](docs/adr/0019-operational-tracking.md)。
+运营数据仅使用 ClickHouse，服务端不保留 SQLite 运行路径。首次运行须配置 CH 环境凭据并执行 `pnpm tracking init`。已迁移后回退的生产库，停服后执行 `pnpm tracking backfill --sqlite /实际路径/analytics.sqlite --since '2026-10-18T10:00:00+08:00'`，将示例时间替换为补数起点，补齐该时间及之后的记录与必要关联数据，再启动新服务。`--since` 必填且必须带时区；无时间的身份、runtime 按关联选择，日汇总包含起点整天，无时间累计计数跳过。脚本只读 SQLite，不做全表摘要/API 对账；选中的坏行计数后跳过，支持重复执行。完整配置、各表时间规则、命令和恢复方式见 [ClickHouse 单库切换与补数](docs/runbooks/clickhouse-migration.md)，设计见 [ADR 0026](docs/adr/0026-clickhouse-tracking.md)。
+
+`pnpm tracking` 默认设置 16 GiB Node 老生代堆上限；离线初始化/补数的 ClickHouse 单次请求与查询默认 5 分钟，可用 `--timeout-ms 300000` 显式指定，整次补数不设总时限。启动日志输出实际堆上限和超时预算。该设置不修改官网进程的内存和超时配置。
+
+
+管理员 `/admin` 新增“运营统计”，支持登录人数、DAU/近30天MAU、用户明细与排名、功能使用和操作明细。独立 ClickHouse 运营存储与采集 API 不改变普通 logger。本地 `pnpm dev` 开放免认证采集，产品开发 overlay 默认上传至 `http://127.0.0.1:4173`，无需 Token 环境变量。未取得 WeLink 工号时保持匿名。部署时显式配置 `trackingEnabled: true`，正常 `pnpm start` 即可接收远程 Host 的 production/development/test 批次；采集认证后续实现，管理员登录保持原规则。详见 [运营统计部署](docs/runbooks/operational-tracking.md) 和 [ADR 0019](docs/adr/0019-operational-tracking.md)。
 
 运营统计环境：管理员页面通过 `/api/admin/analytics/context` 获取默认环境。`pnpm dev`（--dev）默认开发，`pnpm start` 默认生产；采集开关只由 trackingEnabled 控制；手动选择保留为当前浏览器 UI 偏好。数据均按所选环境查询，空表先核对环境、日期与版本筛选。匿名对话、Token、Skill 可查看次数；登录用户数、DAU/MAU 和排名直接按终端当前 WeLink 工号归属。
 
 运营统计支持“全部环境”，跨环境、跨平台的同一工号统一去重；页面不再提供平台筛选。没有工号的旧事件保留匿名，不补归当前登录者。
 
-WeLink 个人资料随事件上报后，用户明细、排名和操作明细显示姓名、工号与最小部门；悬浮或键盘聚焦部门可查看完整部门，个人详情另展示一级部门。资料按成功查询时间更新，旧客户端与离线补传不会清空或倒退已有资料。SQLite 自动升级至 v3；部署必须先升级并重启官网，再更新工作助手，详见运营统计部署手册。官网使用仅依赖 zod 的 `@dsh-ops/tracking-contract` 制品，不安装终端 tracking 插件。
+WeLink 个人资料随事件上报后，用户明细、排名和操作明细显示姓名、工号与最小部门；悬浮或键盘聚焦部门可查看完整部门，个人详情另展示一级部门。资料按成功查询时间更新，旧客户端与离线补传不会清空或倒退已有资料。部署必须先升级并重启官网，再更新工作助手，详见运营统计部署手册。官网使用仅依赖 zod 的 `@dsh-ops/tracking-contract` 制品，不安装终端 tracking 插件。
